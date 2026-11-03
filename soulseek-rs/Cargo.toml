@@ -39,7 +39,6 @@ deser-value = "0.10.2"
 h12tiny = { version = "0.7.0", default-features = false, features = ["client-sync"] }
 log = "0.4"
 rand = "0.10"
-url = "2"
 xmltree = "0.10"
 directories = "6"
 # Linux uses the pure-Rust zbus Secret Service backend (async-secret-service

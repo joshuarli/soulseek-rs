@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 
-use url::Url;
 use xmltree::{self, Element};
 
 use super::super::errors::{
@@ -19,19 +18,36 @@ pub fn parse_search_result(text: &str) -> Result<(SocketAddr, String), SearchErr
         let line = line.trim();
         if line.to_ascii_lowercase().starts_with("location:") {
             if let Some(colon) = line.find(':') {
-                let url_text = &line[colon + 1..].trim();
-                let url = Url::parse(url_text).map_err(|_| InvalidResponse)?;
-                let addr: IpAddr = url
-                    .host_str()
-                    .ok_or(InvalidResponse)
-                    .and_then(|s| s.parse().map_err(|_| InvalidResponse))?;
-                let port: u16 = url.port_or_known_default().ok_or(InvalidResponse)?;
-
-                return Ok((SocketAddr::new(addr, port), url.path().to_string()));
+                let url_text = line[colon + 1..].trim();
+                return parse_location(url_text).ok_or(InvalidResponse);
             }
         }
     }
     Err(InvalidResponse)
+}
+
+fn parse_location(url: &str) -> Option<(SocketAddr, String)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme.to_ascii_lowercase().as_str() {
+        "http" | "ws" => 80,
+        "https" | "wss" => 443,
+        "ftp" => 21,
+        _ => return None,
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, rest) = rest.split_at(authority_end);
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, "")) => (host, default_port),
+        Some((host, port)) => (host, port.parse().ok()?),
+        None => (authority, default_port),
+    };
+    let addr = SocketAddr::new(host.parse().ok()?, port);
+    let path_end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let path = match &rest[..path_end] {
+        "" => "/".to_owned(),
+        path => path.to_owned(),
+    };
+    Some((addr, path))
 }
 
 pub fn parse_control_urls<R>(resp: R) -> Result<(String, String), SearchError>
@@ -413,6 +429,24 @@ fn test_parse_search_result_ok() {
 #[test]
 fn test_parse_search_result_fail() {
     assert!(parse_search_result("content-type:http://0.0.0.0:0/control_url").is_err());
+}
+
+#[test]
+fn test_parse_search_result_default_port() {
+    let (addr, path) = parse_search_result("location:http://192.168.1.1/rootDesc.xml").unwrap();
+    assert_eq!(addr, SocketAddr::from(([192, 168, 1, 1], 80)));
+    assert_eq!(path, "/rootDesc.xml");
+}
+
+#[test]
+fn test_parse_search_result_drops_query_and_fragment() {
+    let (_, path) = parse_search_result("location:http://0.0.0.0:0/control_url?a=b#c").unwrap();
+    assert_eq!(path, "/control_url");
+}
+
+#[test]
+fn test_parse_search_result_without_host_fails() {
+    assert!(parse_search_result("location:http:///control_url").is_err());
 }
 
 #[test]
