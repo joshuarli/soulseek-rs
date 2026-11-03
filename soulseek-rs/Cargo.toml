@@ -49,7 +49,7 @@ deser-toml = "0.10.2"
 deser-value = "0.10.2"
 h12tiny = { version = "0.7.0", default-features = false, features = ["client-sync"] }
 log = "0.4"
-rand = "0.10"
+fastrand = "2.5.0"
 xmltree = "0.10"
 directories = "6"
 getrandom = "0.4.3"
