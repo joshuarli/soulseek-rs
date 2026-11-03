@@ -201,18 +201,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "attohttpc"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16e2cdb6d5ed835199484bb92bb8b3edd526effe995c61732580439c1a67e2e9"
-dependencies = [
- "base64",
- "http",
- "log",
- "url",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -908,6 +896,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "h12tiny"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "820f3d4413e64c721437fd0c52e4bb64939b2dc3f5b190cdafc027ae00dc24fc"
+dependencies = [
+ "h12tiny-client-sync",
+]
+
+[[package]]
+name = "h12tiny-client-normalize"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "726288f88917e16eb154bdbda5034bdabbe73aee8b7526513a3b21d599b1c0d2"
+dependencies = [
+ "http",
+]
+
+[[package]]
+name = "h12tiny-client-sync"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ef7862202992a23100a6347155bda3cab6a237cd161a4d3998ccdaebbb65207"
+dependencies = [
+ "h12tiny-client-normalize",
+ "http",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,9 +983,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
 dependencies = [
  "bytes",
  "itoa",
@@ -1087,10 +1103,8 @@ dependencies = [
 [[package]]
 name = "igd-next"
 version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de7238d487a9aff61f81b5ab41c0a841532a115a398b5fa92a2fadd0885e2581"
 dependencies = [
- "attohttpc",
+ "h12tiny",
  "log",
  "rand 0.10.2",
  "url",

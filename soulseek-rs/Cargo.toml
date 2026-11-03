@@ -32,7 +32,7 @@ lexopt = "0.3"
 ratatui = "0.30.2"
 unicode-width = "0.2"
 dotenv = "0.15.0"
-igd-next = "0.17"
+igd-next = { version = "0.17.1", path = "../vendor/igd-next" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
