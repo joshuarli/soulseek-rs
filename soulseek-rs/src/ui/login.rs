@@ -169,7 +169,7 @@ pub struct LoginOutcome {
     pub username: String,
     pub password: String,
     /// True when the password was typed into the form (as opposed to coming
-    /// from CLI/env/keychain) — only then do we offer to store it.
+    /// from CLI/env/the saved file) — only then do we offer to store it.
     pub entered_via_form: bool,
 }
 

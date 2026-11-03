@@ -311,7 +311,7 @@ pub const PASSWORD: OptionSpec = with_env(
         "password",
         "PASSWORD",
         ValueKind::Text,
-        "Password (visible in `ps`; prefer --password-stdin or the OS keychain)",
+        "Password (visible in `ps`; prefer --password-stdin or the saved password)",
     ),
     "SOULSEEK_PASSWORD",
 );

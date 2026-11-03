@@ -637,12 +637,13 @@ Four ways to supply a password, in the order they are consulted:
 
 1. `--password-stdin`: read the first line of stdin, like `docker login`.
 2. `--password` / `SOULSEEK_PASSWORD`: convenient, but visible in `ps`.
-3. The **OS keychain** (macOS Keychain, Linux Secret Service), under service
-   `soulseek-rs` and your username. The TUI stores your password here after a
-   successful login.
+3. The saved password in `credentials.toml` next to `config.toml`, readable
+   only by you (mode 0600). The TUI stores your password here after a
+   successful login. It is plain text on disk, unlike an OS keychain; use
+   `password_cmd` instead if you would rather keep no copy at all.
 4. `password_cmd` / `--password-cmd`: a shell command whose stdout is the
-   password, e.g. `pass show soulseek`. Best for headless boxes with no
-   keychain.
+   password, e.g. `pass show soulseek`. Best when you would rather keep no
+   password on disk at all.
 
 ```bash
 # Nothing sensitive on the command line or in the environment

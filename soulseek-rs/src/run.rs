@@ -278,7 +278,7 @@ fn context(
             password(cli, resolved)?.ok_or_else(|| {
                 CliError::usage(
                     "no password: pass --password/--password-stdin, set \
-                     SOULSEEK_PASSWORD, store one in the OS keychain, or set \
+                     SOULSEEK_PASSWORD, log in with the TUI to save one, or set \
                      password_cmd",
                 )
             })?,
@@ -377,8 +377,8 @@ fn daemon_endpoint(
     crate::daemon::local_daemon().map(crate::remote::Endpoint::Socket)
 }
 
-/// Resolve the password: stdin beats the flag/env, which beats the keychain,
-/// which beats `password_cmd`.
+/// Resolve the password: stdin beats the flag/env, which beats the saved
+/// password, which beats `password_cmd`.
 fn password(
     cli: &Cli,
     resolved: &crate::persist::config::Resolved,
@@ -390,7 +390,7 @@ fn password(
         cli.password.as_deref(),
         resolved.username.as_deref(),
         resolved.password_cmd.as_deref(),
-        &crate::persist::secret::KeyringStore,
+        &crate::persist::secret::FileStore::default(),
     ))
 }
 
@@ -497,7 +497,7 @@ fn run_default_tui(
     }
 
     let shared_directories = shared_directories(resolved, &out);
-    let secret_store = crate::persist::secret::KeyringStore;
+    let secret_store = crate::persist::secret::FileStore::default();
     let mut initial_password = password(cli, resolved)?;
 
     let enable_listen = !resolved.disable_listener;
@@ -656,7 +656,7 @@ fn run_attached_tui(
 }
 
 /// After a successful login, remember the username in config.toml and — when
-/// it was typed into the form — the password in the OS keychain. Both are
+/// it was typed into the form — the password in credentials.toml. Both are
 /// best-effort: failing to persist must not break a working session.
 fn persist_credentials(
     outcome: &crate::ui::login::LoginOutcome,
@@ -669,7 +669,7 @@ fn persist_credentials(
     if outcome.entered_via_form
         && let Err(e) = secret_store.set(&outcome.username, &outcome.password)
     {
-        eprintln!("⚠️  Could not store password in keychain: {e}");
+        eprintln!("⚠️  Could not store password in credentials.toml: {e}");
     }
 }
 

@@ -795,7 +795,7 @@ mod tests {
     }
 
     /// A daemon over a session the caller can read back, with an in-memory
-    /// secret store: no test may touch the machine's keychain.
+    /// secret store: no test may touch the machine's credentials file.
     fn daemon_with(token: &str, session: Arc<SilentSession>) -> Daemon {
         Daemon {
             session,

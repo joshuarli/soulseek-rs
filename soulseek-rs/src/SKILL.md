@@ -156,8 +156,8 @@ server did not answer — those are different facts, so do not treat null as 0.
 `--new-password-stdin`, which reads the first line of stdin and keeps the
 password out of `ps`) — one object: `user`, `action` (`password-changed`).
 The server never confirms a password change, so exit 0 means the request went
-out. The new password is stored in this machine's keychain, or the daemon's
-when the run is routed to one.
+out. The new password is stored in this machine's credentials file, or the
+daemon's when the run is routed to one.
 
 **`account logout`** — one object: `user`, `action` (`logged-out`). Forgets
 the password stored on this machine; the account itself is untouched, and the
@@ -545,7 +545,7 @@ the file.
   own. Start a daemon and route through it rather than hunting for
   an unused name.
 - **Never put a password in argv** — `ps` shows it to every user on the box.
-  Use `--password-stdin`, the OS keychain, or `SOULSEEK_PASSWORD_CMD`.
+  Use `--password-stdin`, the saved password, or `SOULSEEK_PASSWORD_CMD`.
 - **Downloading pulls a file off a stranger's machine.** Confirm with the user
   before `get --pick all` or any fetch whose size is not known up front.
 - **Sharing nothing gets the user banned.** Check `shares status` before a

@@ -4,7 +4,7 @@
 use super::{Ctx, Session};
 use crate::cli::PasswordArgs;
 use crate::output::{AccountRecord, CliError, CliResult, Out};
-use crate::persist::secret::{KeyringStore, SecretStore};
+use crate::persist::secret::{FileStore, SecretStore};
 
 /// Change the account's password and store the new one, so the next start
 /// still logs in.
@@ -14,7 +14,7 @@ pub fn password(ctx: &Ctx, args: &PasswordArgs) -> CliResult {
     let user = session.client.username();
     let stored = crate::persist::secret::change_password(
         session.client.as_ref(),
-        &KeyringStore,
+        &FileStore::default(),
         &new,
     )
     .map_err(|e| {
@@ -35,7 +35,7 @@ pub fn password(ctx: &Ctx, args: &PasswordArgs) -> CliResult {
 /// goes is this machine's copy of the way in.
 pub fn logout(out: &Out, username: Option<&str>) -> CliResult {
     let user = username.ok_or_else(crate::run::missing_username)?;
-    KeyringStore.delete(user).map_err(|e| {
+    FileStore::default().delete(user).map_err(|e| {
         CliError::usage(format!("cannot clear the stored password: {e}"))
     })?;
     out.emit(&AccountRecord {

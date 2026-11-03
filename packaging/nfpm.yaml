@@ -14,8 +14,6 @@ description: |
 vendor: Michel de Graaf
 homepage: https://re-invention.nl/soulseek-rs/
 license: MIT
-suggests:
-  - gnome-keyring
 contents:
   - src: target/nfpm/soulseek-rs
     dst: /usr/bin/soulseek-rs

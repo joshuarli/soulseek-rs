@@ -13,6 +13,13 @@ pub fn config_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
 }
 
+/// Saved account passwords, kept apart from config.toml so no config command
+/// can print one. Written with owner-only permissions.
+#[must_use]
+pub fn credentials_file() -> Option<PathBuf> {
+    config_file().map(|path| path.with_file_name("credentials.toml"))
+}
+
 #[must_use]
 pub fn state_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("SOULSEEK_STATE_DIR") {

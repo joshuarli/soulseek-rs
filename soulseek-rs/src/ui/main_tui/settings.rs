@@ -4,7 +4,7 @@
 
 use super::MainTui;
 use crate::models::{AccountInfo, SettingsAction, SettingsState};
-use crate::persist::secret::KeyringStore;
+use crate::persist::secret::FileStore;
 use ratatui::crossterm::event::KeyEvent;
 
 impl MainTui {
@@ -45,7 +45,7 @@ impl MainTui {
     fn change_password(&mut self, password: &str) {
         let status = match crate::persist::secret::change_password(
             self.client.as_ref(),
-            &KeyringStore,
+            &FileStore::default(),
             password,
         ) {
             Ok(None) => "Password changed".into(),
