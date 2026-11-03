@@ -3,8 +3,10 @@
 //! Stored as Unix seconds. Serialized as RFC 3339 so state files written by
 //! older builds still load, and displayed in local time.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde::de::{self, Visitor};
+use deser::de::{Slot, default_atom};
+use deser::ser::Emit;
+use deser::{Atom, Deserialize, Error, ErrorKind, Serialize, State};
+use std::borrow::Cow;
 use std::fmt;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -130,54 +132,42 @@ impl fmt::Display for Timestamp {
 }
 
 impl Serialize for Timestamp {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_rfc3339())
+    fn serialize<'a>(
+        value: &'a Self,
+        _state: &mut State,
+    ) -> Result<Emit<'a>, Error> {
+        Ok(value.to_rfc3339().into())
     }
 }
 
-impl<'de> Deserialize<'de> for Timestamp {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct TimestampVisitor;
-
-        impl Visitor<'_> for TimestampVisitor {
-            type Value = Timestamp;
-
-            fn expecting(
-                &self,
-                formatter: &mut fmt::Formatter<'_>,
-            ) -> fmt::Result {
-                formatter.write_str("a Unix timestamp or an RFC 3339 string")
+impl Deserialize<'_> for Timestamp {
+    fn deserialize_atom(
+        slot: &mut Slot<Self>,
+        atom: Atom,
+        state: &mut State,
+    ) -> Result<(), Error> {
+        let unix = match atom {
+            Atom::U64(value) => i64::try_from(value).map_err(|_| {
+                Error::new(ErrorKind::OutOfRange, "timestamp out of range")
+            })?,
+            Atom::I64(value) => value,
+            Atom::Str(value) | Atom::Lexical(value) => {
+                Self::parse_rfc3339(&value).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidValue,
+                        "invalid RFC 3339 timestamp",
+                    )
+                })?
+                .unix
             }
+            other => return default_atom(slot, other, state),
+        };
+        slot.set(Self::from_unix(unix));
+        Ok(())
+    }
 
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(Timestamp::from_unix(value))
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                i64::try_from(value)
-                    .map(Timestamp::from_unix)
-                    .map_err(|_| E::custom("timestamp out of range"))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Timestamp::parse_rfc3339(value)
-                    .ok_or_else(|| E::custom("invalid RFC 3339 timestamp"))
-            }
-        }
-
-        deserializer.deserialize_any(TimestampVisitor)
+    fn expecting() -> Cow<'static, str> {
+        Cow::Borrowed("a Unix timestamp or an RFC 3339 string")
     }
 }
 
@@ -219,6 +209,7 @@ fn utc_hhmm(unix: i64) -> String {
     format!("{:02}:{:02} ", seconds / 3_600, (seconds % 3_600) / 60)
 }
 
+#[allow(deprecated)]
 fn local_hhmm(unix: i64) -> String {
     let time = unix as libc::time_t;
     let mut broken_down = std::mem::MaybeUninit::<libc::tm>::zeroed();

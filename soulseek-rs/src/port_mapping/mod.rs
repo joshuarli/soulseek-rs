@@ -418,11 +418,7 @@ mod tests {
         thread::spawn(move || {
             let mut buf = [0u8; 64];
             // Answer many requests (initial map + cleanup unmap + any renews).
-            loop {
-                let (n, from) = match socket.recv_from(&mut buf) {
-                    Ok(received) => received,
-                    Err(_) => break,
-                };
+            while let Ok((n, from)) = socket.recv_from(&mut buf) {
                 let request = buf[..n].to_vec();
                 let internal = u16::from_be_bytes([request[4], request[5]]);
                 let lifetime = u32::from_be_bytes([

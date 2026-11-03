@@ -2,36 +2,37 @@
 //! the wire, independent of the methods they carry.
 
 use crate::output::Exit;
-use serde::{Deserialize, Serialize};
+use deser::{Deserialize, Serialize};
+use deser_value::Value;
 
 /// A request from a client. `id` is absent for a notification, which by
 /// JSON-RPC rule gets no reply.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Request {
-    #[serde(default = "jsonrpc_version")]
+    #[deser(default = jsonrpc_version())]
     pub jsonrpc: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<serde_json::Value>,
+    #[deser(default, skip_serializing_if = Option::is_none)]
+    pub id: Option<Value>,
     pub method: String,
-    #[serde(default)]
-    pub params: serde_json::Value,
+    #[deser(default)]
+    pub params: Value,
 }
 
 /// A reply. Exactly one of `result`/`error` is set; `id` echoes the request,
 /// and is absent on a daemon-initiated notification.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Response {
-    #[serde(default = "jsonrpc_version")]
+    #[deser(default = jsonrpc_version())]
     pub jsonrpc: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[deser(default, skip_serializing_if = Option::is_none)]
+    pub id: Option<Value>,
+    #[deser(default, skip_serializing_if = Option::is_none)]
     pub method: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[deser(default, skip_serializing_if = Option::is_none)]
+    pub params: Option<Value>,
+    #[deser(default, skip_serializing_if = Option::is_none)]
+    pub result: Option<Value>,
+    #[deser(default, skip_serializing_if = Option::is_none)]
     pub error: Option<RpcError>,
 }
 
@@ -45,7 +46,7 @@ fn jsonrpc_version() -> String {
 pub struct RpcError {
     pub code: i32,
     pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[deser(default, skip_serializing_if = Option::is_none)]
     pub data: Option<ErrorData>,
 }
 
@@ -103,8 +104,8 @@ impl RpcError {
 impl Response {
     #[must_use]
     pub fn result(
-        id: Option<serde_json::Value>,
-        value: serde_json::Value,
+        id: Option<Value>,
+        value: Value,
     ) -> Self {
         Self {
             jsonrpc: jsonrpc_version(),
@@ -124,10 +125,10 @@ impl Response {
     /// would drop the error and wait out its timeout for a reply that is
     /// already there.
     #[must_use]
-    pub fn failure(id: Option<serde_json::Value>, error: RpcError) -> Self {
+    pub fn failure(id: Option<Value>, error: RpcError) -> Self {
         Self {
             jsonrpc: jsonrpc_version(),
-            id: Some(id.unwrap_or(serde_json::Value::Null)),
+            id: Some(id.unwrap_or(Value::null())),
             method: None,
             params: None,
             result: None,
@@ -137,7 +138,7 @@ impl Response {
 
     /// A daemon-initiated event: no id, so no reply is expected.
     #[must_use]
-    pub fn notification(method: &str, params: serde_json::Value) -> Self {
+    pub fn notification(method: &str, params: Value) -> Self {
         Self {
             jsonrpc: jsonrpc_version(),
             id: None,

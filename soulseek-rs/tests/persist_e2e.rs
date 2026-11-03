@@ -59,7 +59,7 @@ fn state_survives_a_restart() {
     // The files on disk are versioned envelopes.
     let raw =
         std::fs::read_to_string(state_dir.join("downloads.json")).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let parsed: deser_value::Value = deser_json::from_str(&raw).unwrap();
     assert!(parsed.get("version").is_some(), "missing version envelope");
 
     // Session 2: a fresh store (new process) sees the same state; the

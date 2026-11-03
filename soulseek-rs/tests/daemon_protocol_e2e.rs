@@ -130,15 +130,15 @@ impl Daemon {
         Some(Connection::from_parts(Box::new(read), Box::new(stream)))
     }
 
-    fn status(&self) -> Option<serde_json::Value> {
+    fn status(&self) -> Option<deser_value::Value> {
         let mut connection = self.connect_tcp()?;
         connection.authenticate(Some(&self.token()))?;
         let reply = connection
             .call(r#"{"jsonrpc":"2.0","id":1,"method":"daemon.status"}"#)?;
-        serde_json::from_str::<serde_json::Value>(&reply)
+        deser_json::from_str::<deser_value::Value>(&reply)
             .ok()?
             .get_mut("result")
-            .map(serde_json::Value::take)
+            .map(deser_value::Value::take)
     }
 }
 
@@ -177,7 +177,7 @@ impl Connection {
         loop {
             let reply = self.read()?;
             let is_notification =
-                serde_json::from_str::<serde_json::Value>(&reply)
+                deser_json::from_str::<deser_value::Value>(&reply)
                     .is_ok_and(|parsed| parsed.get("id").is_none());
             if !is_notification {
                 return Some(reply);
@@ -381,10 +381,10 @@ fn discover_serves_a_contract_whose_parameters_match_what_is_accepted() {
     let reply = connection
         .call(r#"{"jsonrpc":"2.0","id":1,"method":"rpc.discover"}"#)
         .expect("an answer");
-    let document: serde_json::Value =
-        serde_json::from_str(&reply).expect("valid JSON");
+    let document: deser_value::Value =
+        deser_json::from_str(&reply).expect("valid JSON");
     let methods = document["result"]["methods"]
-        .as_array()
+        .as_seq()
         .expect("the contract lists methods");
 
     // The published parameter names have to be the keys the daemon reads.
@@ -396,12 +396,12 @@ fn discover_serves_a_contract_whose_parameters_match_what_is_accepted() {
         .find(|m| m["name"] == "room.join")
         .expect("room.join is published");
     let names: Vec<&str> = join["params"]
-        .as_array()
+        .as_seq()
         .expect("params is an array")
         .iter()
         .map(|p| p["name"].as_str().expect("a name"))
         .collect();
-    assert_eq!(names, ["room"], "{join}");
+    assert_eq!(names, ["room"], "{join:?}");
 
     // And a call built from that description is accepted.
     let accepted = connection
@@ -494,7 +494,7 @@ fn a_config_driven_remote_client_reports_the_daemons_world() {
         "a client configured for a remote daemon should just work: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let record: serde_json::Value = serde_json::from_str(
+    let record: deser_value::Value = deser_json::from_str(
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .find(|line| !line.trim().is_empty())
@@ -510,14 +510,14 @@ fn a_config_driven_remote_client_reports_the_daemons_world() {
         record["server"]
             .as_str()
             .is_some_and(|server| server.starts_with("127.0.0.1:")),
-        "the server the daemon is connected to, not a local default: {record}"
+        "the server the daemon is connected to, not a local default: {record:?}"
     );
     assert!(
         record["download_dir"].as_str().is_some_and(
             |dir| dir.starts_with(std::env::temp_dir().to_str().unwrap())
         ),
         "the directory the bytes actually land in, on the daemon's host, not \
-         this machine's Downloads folder: {record}"
+         this machine's Downloads folder: {record:?}"
     );
 }
 
@@ -552,11 +552,11 @@ fn many_clients_share_one_session_and_agree_about_it() {
                 100 + i
             ))
             .unwrap_or_else(|| panic!("client {i} lost its connection"));
-        let status: serde_json::Value =
-            serde_json::from_str(&reply).expect("valid JSON");
+        let status: deser_value::Value =
+            deser_json::from_str(&reply).expect("valid JSON");
         assert_eq!(
             status["id"],
-            serde_json::json!(100 + i),
+            deser_value::value!(100 + i),
             "replies must not be crossed between clients: {reply}"
         );
         seen.push((
@@ -573,11 +573,11 @@ fn many_clients_share_one_session_and_agree_about_it() {
     let reply = clients[0]
         .call(r#"{"jsonrpc":"2.0","id":200,"method":"daemon.status"}"#)
         .expect("still connected");
-    let status: serde_json::Value =
-        serde_json::from_str(&reply).expect("valid JSON");
+    let status: deser_value::Value =
+        deser_json::from_str(&reply).expect("valid JSON");
     assert_eq!(
         status["result"]["clients"],
-        serde_json::json!(8),
+        deser_value::value!(8),
         "all eight should still be attached: {reply}"
     );
 }
@@ -614,11 +614,11 @@ fn rapid_connect_and_drop_does_not_wear_the_daemon_out() {
     let status = connection
         .call(r#"{"jsonrpc":"2.0","id":1,"method":"daemon.status"}"#)
         .expect("an answer");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&status).expect("valid JSON");
+    let parsed: deser_value::Value =
+        deser_json::from_str(&status).expect("valid JSON");
     assert_eq!(
         parsed["result"]["clients"],
-        serde_json::json!(1),
+        deser_value::value!(1),
         "abandoned connections must not still be counted: {status}"
     );
 }
@@ -646,10 +646,10 @@ fn one_clients_work_shows_up_in_another() {
                 r#"{{"jsonrpc":"2.0","id":{id},"method":"search.list"}}"#
             ))
             .expect("an answer");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&reply).expect("valid JSON");
+        let parsed: deser_value::Value =
+            deser_json::from_str(&reply).expect("valid JSON");
         parsed["result"]["searches"]
-            .as_array()
+            .as_seq()
             .expect("searches is an array")
             .iter()
             .filter_map(|search| search["query"].as_str().map(String::from))
@@ -677,10 +677,10 @@ fn one_clients_work_shows_up_in_another() {
                 r#"{{"jsonrpc":"2.0","id":{id},"method":"search.results","params":{{"query":"shared_probe"}}}}"#
             ))
             .expect("an answer");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&reply).expect("valid JSON");
+        let parsed: deser_value::Value =
+            deser_json::from_str(&reply).expect("valid JSON");
         parsed["result"]["results"]
-            .as_array()
+            .as_seq()
             .expect("results is an array")
             .len()
     };
@@ -721,10 +721,10 @@ fn a_client_that_attaches_later_sees_what_is_already_there() {
     let reply = late
         .call(r#"{"jsonrpc":"2.0","id":3,"method":"search.list"}"#)
         .expect("an answer");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&reply).expect("valid JSON");
+    let parsed: deser_value::Value =
+        deser_json::from_str(&reply).expect("valid JSON");
     let mut queries = parsed["result"]["searches"]
-        .as_array()
+        .as_seq()
         .expect("searches is an array")
         .iter()
         .filter_map(|search| search["query"].as_str());
@@ -740,10 +740,10 @@ fn a_client_that_attaches_later_sees_what_is_already_there() {
                 r#"{{"jsonrpc":"2.0","id":{id},"method":"download.list"}}"#
             ))
             .expect("an answer");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&reply).expect("valid JSON");
+        let parsed: deser_value::Value =
+            deser_json::from_str(&reply).expect("valid JSON");
         assert!(
-            parsed["result"]["downloads"].is_array(),
+            parsed["result"]["downloads"].is_seq(),
             "both windows read one queue: {reply}"
         );
     }
@@ -766,7 +766,10 @@ fn the_download_folder_moves_when_asked_and_status_says_so() {
     let reply = connection
         .call(&format!(
             r#"{{"jsonrpc":"2.0","id":2,"method":"download.set_dir","params":{{"directory":{}}}}}"#,
-            serde_json::json!(moved.to_str().expect("utf-8 path"))
+            deser_json::to_string(&deser_value::value!(
+                moved.to_str().expect("utf-8 path")
+            ))
+            .expect("a JSON string")
         ))
         .expect("an answer");
     assert!(reply.contains(r#""ok":true"#), "got {reply}");
@@ -778,8 +781,8 @@ fn the_download_folder_moves_when_asked_and_status_says_so() {
     let status = connection
         .call(r#"{"jsonrpc":"2.0","id":3,"method":"daemon.status"}"#)
         .expect("an answer");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&status).expect("valid JSON");
+    let parsed: deser_value::Value =
+        deser_json::from_str(&status).expect("valid JSON");
     assert_eq!(
         parsed["result"]["download_dir"],
         moved.to_str().expect("utf-8 path"),
@@ -816,10 +819,10 @@ fn a_wishlist_search_is_reported_as_just_started() {
     let listed = connection
         .call(r#"{"jsonrpc":"2.0","id":3,"method":"search.list"}"#)
         .expect("an answer");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&listed).expect("valid JSON");
+    let parsed: deser_value::Value =
+        deser_json::from_str(&listed).expect("valid JSON");
     let age = parsed["result"]["searches"]
-        .as_array()
+        .as_seq()
         .expect("searches is an array")
         .iter()
         .find(|search| search["query"] == "wishlist_probe")

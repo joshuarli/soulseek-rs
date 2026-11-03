@@ -1,12 +1,12 @@
 use crate::error::Result;
-use serde::{Deserialize, Serialize};
+use deser::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Optional settings read from `config.toml`. Every field is optional so a
 /// partial file (or none at all) is valid; unknown keys are ignored so newer
 /// configs still load in older builds.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[deser(default)]
 pub struct FileConfig {
     pub username: Option<String>,
     pub server: Option<String>,
@@ -251,7 +251,7 @@ impl FileConfig {
                 )));
             }
         };
-        toml::from_str(&text).map_err(|e| {
+        deser_toml::from_str(&text).map_err(|e| {
             crate::error::Error::msg(format!(
                 "Malformed {}: {e}",
                 path.display()
@@ -264,7 +264,7 @@ impl FileConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, toml::to_string_pretty(self)?)?;
+        std::fs::write(path, deser_toml::to_string(self)?)?;
         Ok(())
     }
 }

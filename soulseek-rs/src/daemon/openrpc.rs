@@ -323,8 +323,9 @@ fn document() -> Value {
         .map(|&event| (event, event_schema(event, &mut generator)))
         .collect();
 
-    let definitions: serde_json::Map<String, Value> =
+    let mut definitions: serde_json::Map<String, Value> =
         generator.take_definitions(true).into_iter().collect();
+    add_defaults_schemars_cannot_serialize(&mut definitions);
 
     let methods = shapes.into_iter().map(|(method, params, result)| {
         json!({
@@ -381,6 +382,35 @@ fn document() -> Value {
         "methods": methods.into_iter().chain(events).collect::<Vec<_>>(),
         "components": { "schemas": definitions },
     })
+}
+
+/// Restore the defaults that depend on a wire DTO. Schemars writes a default
+/// by serializing it with serde, and the DTOs only implement deser.
+fn add_defaults_schemars_cannot_serialize(
+    definitions: &mut serde_json::Map<String, Value>,
+) {
+    let metadata = json!({
+        "bitrate": null,
+        "length_seconds": null,
+        "peer_free_slots": null,
+        "peer_upload_speed": null,
+    });
+    for (schema, property, default) in [
+        ("DaemonStatus", "session_loss", Value::Null),
+        ("DownloadDto", "metadata", metadata.clone()),
+        ("DownloadStartParams", "metadata", metadata),
+        ("UserInfoDto", "presence", Value::Null),
+        ("UserInfoDto", "stats", Value::Null),
+        ("UserResult", "user", Value::Null),
+    ] {
+        if let Some(property) = definitions
+            .get_mut(schema)
+            .and_then(|schema| schema.get_mut("properties"))
+            .and_then(|properties| properties.get_mut(property))
+        {
+            property["default"] = default;
+        }
+    }
 }
 
 /// Where the published document lives. Inside this crate, not the repository's
@@ -462,19 +492,23 @@ fn published_parameters_are_the_keys_the_daemon_reads() {
             .map(|p| p["name"].as_str().expect("a name").to_string())
             .collect()
     };
-    let keys = |value: &Value| -> Vec<String> {
-        value
-            .as_object()
+    let keys = |value: deser_value::Value| -> Vec<String> {
+        let mut keys = value
+            .as_map()
             .expect("params serialize as an object")
             .keys()
-            .cloned()
-            .collect()
+            .map(|key| {
+                key.as_str().expect("a parameter name is a string").to_string()
+            })
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
     };
 
     assert_eq!(
         published("room.join"),
         keys(
-            &serde_json::to_value(RoomRef {
+            deser_value::to_value(&RoomRef {
                 room: "lobby".into()
             })
             .unwrap()
@@ -482,12 +516,14 @@ fn published_parameters_are_the_keys_the_daemon_reads() {
     );
     assert_eq!(
         published("search.results"),
-        keys(&serde_json::to_value(QueryParams { query: "x".into() }).unwrap())
+        keys(
+            deser_value::to_value(&QueryParams { query: "x".into() }).unwrap()
+        )
     );
     assert_eq!(
         published("download.pause"),
         keys(
-            &serde_json::to_value(TransferRef {
+            deser_value::to_value(&TransferRef {
                 username: "bob".into(),
                 filename: "a.mp3".into()
             })

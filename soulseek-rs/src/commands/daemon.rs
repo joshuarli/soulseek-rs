@@ -59,13 +59,13 @@ pub fn stop(
     endpoint: Option<&Endpoint>,
     token: Option<String>,
 ) -> CliResult {
-    let _: serde_json::Value = ask(endpoint, token, Method::DaemonStop)?;
+    let _: deser_value::Value = ask(endpoint, token, Method::DaemonStop)?;
     out.status("the daemon is stopping");
     Ok(())
 }
 
 /// One request to whichever daemon this run is pointed at.
-fn ask<T: serde::de::DeserializeOwned>(
+fn ask<T: deser::de::DeserializeOwned>(
     endpoint: Option<&Endpoint>,
     token: Option<String>,
     method: Method,

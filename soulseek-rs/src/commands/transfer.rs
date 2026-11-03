@@ -633,7 +633,7 @@ fn parse_request(line: &str) -> Result<Option<Request>, String> {
     }
 
     let (user, path, size) = if line.trim_start().starts_with('{') {
-        let record: JsonRequest = serde_json::from_str(line.trim())
+        let record: JsonRequest = deser_json::from_str(line.trim())
             .map_err(|e| format!("invalid JSON record: {e}"))?;
         (record.user, record.path, record.size)
     } else {
@@ -663,11 +663,11 @@ fn parse_request(line: &str) -> Result<Option<Request>, String> {
 
 /// The subset of a `search`/`browse` JSON record a download needs. Extra
 /// fields are ignored, so a record enriched by `jq` still parses.
-#[derive(serde::Deserialize)]
+#[derive(deser::Deserialize)]
 struct JsonRequest {
     user: String,
     path: String,
-    #[serde(default)]
+    #[deser(default)]
     size: u64,
 }
 

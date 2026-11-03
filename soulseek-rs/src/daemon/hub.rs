@@ -15,6 +15,7 @@ use super::proto::{
     SessionLossEvent, UploadInfoDto, UploadStatusDto, UserMessageDto,
 };
 use crate::api::SessionApi;
+use deser_value::Value;
 use soulseek_rs::{DownloadStatus, SessionLoss};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,7 +102,7 @@ impl Hub {
 
     /// Send one event to everyone, dropping any client that has stopped
     /// keeping up. The drainer must never block on a subscriber.
-    fn publish(&self, event: Event, params: serde_json::Value) {
+    fn publish(&self, event: Event, params: Value) {
         let Ok(mut subscribers) = self.subscribers.lock() else {
             return;
         };
@@ -248,8 +249,8 @@ fn tick(
     for event in session.take_room_events() {
         hub.publish(
             Event::Room,
-            serde_json::to_value(super::proto::RoomEventDto::from(&event))
-                .unwrap_or(serde_json::Value::Null),
+            deser_value::to_value(&super::proto::RoomEventDto::from(&event))
+                .unwrap_or(Value::null()),
         );
     }
 
@@ -263,7 +264,7 @@ fn tick(
         });
         hub.publish(
             Event::Message,
-            serde_json::to_value(&dto).unwrap_or(serde_json::Value::Null),
+            deser_value::to_value(&dto).unwrap_or(Value::null()),
         );
     }
 
@@ -279,8 +280,8 @@ fn tick(
     if let Some(loss) = loss {
         hub.publish(
             Event::SessionLoss,
-            serde_json::to_value(SessionLossEvent { loss: loss.into() })
-                .unwrap_or(serde_json::Value::Null),
+            deser_value::to_value(&SessionLossEvent { loss: loss.into() })
+                .unwrap_or(Value::null()),
         );
     }
 }
@@ -315,7 +316,7 @@ fn publish_uploads(
         );
         hub.publish(
             Event::Upload,
-            serde_json::to_value(&upload).unwrap_or(serde_json::Value::Null),
+            deser_value::to_value(&upload).unwrap_or(Value::null()),
         );
         // An upload that has finished cannot change again, so remembering it
         // would grow this table by one entry per file for the life of the
@@ -340,11 +341,11 @@ fn publish_browses(
         browses.forget(&username);
         hub.publish(
             Event::Browse,
-            serde_json::to_value(BrowseEvent {
+            deser_value::to_value(&BrowseEvent {
                 username,
                 directories: directories.iter().map(Into::into).collect(),
             })
-            .unwrap_or(serde_json::Value::Null),
+            .unwrap_or(Value::null()),
         );
     }
 }
@@ -359,12 +360,12 @@ fn publish_downloads(hub: &Hub, downloads: &Mutex<Vec<PendingDownload>>) {
             match pending.updates.try_recv() {
                 Ok(status) => hub.publish(
                     Event::DownloadStatus,
-                    serde_json::to_value(DownloadStatusEvent {
+                    deser_value::to_value(&DownloadStatusEvent {
                         username: pending.username.clone(),
                         filename: pending.filename.clone(),
                         status: (&status).into(),
                     })
-                    .unwrap_or(serde_json::Value::Null),
+                    .unwrap_or(Value::null()),
                 ),
                 Err(std::sync::mpsc::TryRecvError::Empty) => return true,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -378,7 +379,7 @@ fn publish_downloads(hub: &Hub, downloads: &Mutex<Vec<PendingDownload>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use deser_value::value;
 
     fn drain(receiver: &Receiver<Response>) -> Vec<String> {
         let mut seen = Vec::new();
@@ -396,7 +397,7 @@ mod tests {
         let (_, first) = hub.subscribe(|| {});
         let (_, second) = hub.subscribe(|| {});
 
-        hub.publish(Event::Room, json!({ "event": "left", "room": "lobby" }));
+        hub.publish(Event::Room, value!({ "event": "left", "room": "lobby" }));
 
         assert_eq!(drain(&first), ["event.room"]);
         assert_eq!(drain(&second), ["event.room"]);
@@ -407,7 +408,7 @@ mod tests {
         let hub = Hub::new();
         let (id, receiver) = hub.subscribe(|| {});
         hub.unsubscribe(id);
-        hub.publish(Event::Upload, json!({}));
+        hub.publish(Event::Upload, value!({}));
         assert!(drain(&receiver).is_empty());
         assert_eq!(hub.subscribers(), 0);
     }
@@ -422,7 +423,7 @@ mod tests {
         // which is exactly the asymmetry the bound exists to survive.
         let mut received = 0;
         for _ in 0..(QUEUE_DEPTH + 10) {
-            hub.publish(Event::Upload, json!({}));
+            hub.publish(Event::Upload, value!({}));
             received += drain(&healthy).len();
         }
 
@@ -445,7 +446,7 @@ mod tests {
         let hub = Hub::new();
         let (_, receiver) = hub.subscribe(|| {});
         drop(receiver);
-        hub.publish(Event::Message, json!({}));
+        hub.publish(Event::Message, value!({}));
         assert_eq!(hub.subscribers(), 0);
     }
 

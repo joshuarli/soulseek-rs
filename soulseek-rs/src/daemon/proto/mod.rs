@@ -164,9 +164,9 @@ mod tests {
             }],
         };
 
-        let json = serde_json::to_string(&SearchResultDto::from(&original))
+        let json = deser_json::to_string(&SearchResultDto::from(&original))
             .expect("a DTO serializes");
-        let back: SearchResult = serde_json::from_str::<SearchResultDto>(&json)
+        let back: SearchResult = deser_json::from_str::<SearchResultDto>(&json)
             .unwrap()
             .into();
 
@@ -204,8 +204,8 @@ mod tests {
         ];
         for status in &statuses {
             let dto = DownloadStatusDto::from(status);
-            let json = serde_json::to_string(&dto).unwrap();
-            let back: DownloadStatusDto = serde_json::from_str(&json).unwrap();
+            let json = deser_json::to_string(&dto).unwrap();
+            let back: DownloadStatusDto = deser_json::from_str(&json).unwrap();
             assert_eq!(dto, back, "{status:?} must survive the wire");
             assert_eq!(
                 DownloadStatusDto::from(&DownloadStatus::from(back)),
@@ -226,9 +226,9 @@ mod tests {
         ];
         for status in &statuses {
             let dto = UploadStatusDto::from(status);
-            let json = serde_json::to_string(&dto).unwrap();
+            let json = deser_json::to_string(&dto).unwrap();
             let back: UploadStatus =
-                serde_json::from_str::<UploadStatusDto>(&json)
+                deser_json::from_str::<UploadStatusDto>(&json)
                     .unwrap()
                     .into();
             assert_eq!(&back, status);
@@ -265,9 +265,9 @@ mod tests {
         ];
         for event in &events {
             let json =
-                serde_json::to_string(&RoomEventDto::from(event)).unwrap();
+                deser_json::to_string(&RoomEventDto::from(event)).unwrap();
             let back: RoomEvent =
-                serde_json::from_str::<RoomEventDto>(&json).unwrap().into();
+                deser_json::from_str::<RoomEventDto>(&json).unwrap().into();
             assert_eq!(&back, event);
         }
     }
@@ -277,9 +277,9 @@ mod tests {
         // "the server has not said" must not arrive as "offline, shares
         // nothing": that is the difference between waiting and giving up.
         let pending = UserInfo::pending("bob".into());
-        let json = serde_json::to_string(&UserInfoDto::from(&pending)).unwrap();
+        let json = deser_json::to_string(&UserInfoDto::from(&pending)).unwrap();
         let back: UserInfo =
-            serde_json::from_str::<UserInfoDto>(&json).unwrap().into();
+            deser_json::from_str::<UserInfoDto>(&json).unwrap().into();
         assert_eq!(back.username, "bob");
         assert!(back.presence.is_none());
         assert!(back.stats.is_none());
@@ -299,9 +299,9 @@ mod tests {
             shared_folders: 2,
         });
 
-        let json = serde_json::to_string(&UserInfoDto::from(&info)).unwrap();
+        let json = deser_json::to_string(&UserInfoDto::from(&info)).unwrap();
         let back: UserInfo =
-            serde_json::from_str::<UserInfoDto>(&json).unwrap().into();
+            deser_json::from_str::<UserInfoDto>(&json).unwrap().into();
         assert_eq!(back, info);
     }
 
@@ -310,8 +310,8 @@ mod tests {
         let message =
             UserMessage::new(9, 1234, "bob".into(), "hi".into(), true);
         let json =
-            serde_json::to_string(&UserMessageDto::from(&message)).unwrap();
-        let back: UserMessage = serde_json::from_str::<UserMessageDto>(&json)
+            deser_json::to_string(&UserMessageDto::from(&message)).unwrap();
+        let back: UserMessage = deser_json::from_str::<UserMessageDto>(&json)
             .unwrap()
             .into();
         assert_eq!(back.id(), 9);
@@ -330,10 +330,10 @@ mod tests {
                 attributes: vec![(0, 320)],
             }],
         };
-        let json = serde_json::to_string(&SharedDirectoryDto::from(&directory))
+        let json = deser_json::to_string(&SharedDirectoryDto::from(&directory))
             .unwrap();
         let back: SharedDirectory =
-            serde_json::from_str::<SharedDirectoryDto>(&json)
+            deser_json::from_str::<SharedDirectoryDto>(&json)
                 .unwrap()
                 .into();
         assert_eq!(back.name, directory.name);
@@ -351,8 +351,8 @@ mod tests {
             Exit::SessionLost,
         ] {
             let error = RpcError::application(exit, "nope");
-            let json = serde_json::to_string(&error).unwrap();
-            let back: RpcError = serde_json::from_str(&json).unwrap();
+            let json = deser_json::to_string(&error).unwrap();
+            let back: RpcError = deser_json::from_str(&json).unwrap();
             assert_eq!(back.exit(), exit);
         }
     }
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn a_request_parses_without_optional_fields() {
-        let request: Request = serde_json::from_str(
+        let request: Request = deser_json::from_str(
             r#"{"jsonrpc":"2.0","method":"daemon.status"}"#,
         )
         .expect("params and id are optional");
@@ -379,7 +379,7 @@ mod tests {
         // JSON-RPC requires it, and without it a client following the
         // documented "no id means a notification" rule drops the error and
         // waits out its timeout for a reply that already arrived.
-        let json = serde_json::to_string(&Response::failure(
+        let json = deser_json::to_string(&Response::failure(
             None,
             RpcError::new(CODE_PARSE, "unparseable"),
         ))
@@ -390,24 +390,24 @@ mod tests {
     #[test]
     fn a_notification_carries_no_id_so_no_reply_is_expected() {
         let notification =
-            Response::notification("event.room", serde_json::json!({"a": 1}));
-        let json = serde_json::to_string(&notification).unwrap();
+            Response::notification("event.room", deser_value::value!({"a": 1}));
+        let json = deser_json::to_string(&notification).unwrap();
         assert!(!json.contains("\"id\""), "{json}");
         assert!(json.contains("\"method\":\"event.room\""), "{json}");
     }
 
     #[test]
     fn a_response_serializes_exactly_one_of_result_and_error() {
-        let ok = serde_json::to_string(&Response::result(
-            Some(serde_json::json!(1)),
-            serde_json::json!({}),
+        let ok = deser_json::to_string(&Response::result(
+            Some(deser_value::value!(1)),
+            deser_value::value!({}),
         ))
         .unwrap();
         assert!(ok.contains("\"result\""));
         assert!(!ok.contains("\"error\""));
 
-        let failed = serde_json::to_string(&Response::failure(
-            Some(serde_json::json!(1)),
+        let failed = deser_json::to_string(&Response::failure(
+            Some(deser_value::value!(1)),
             RpcError::application(Exit::NoResults, "nothing"),
         ))
         .unwrap();

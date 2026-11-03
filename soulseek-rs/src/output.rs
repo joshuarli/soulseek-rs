@@ -5,7 +5,7 @@
 //! newline-delimited JSON (`--json`) or as tab-separated text, so both `jq`
 //! and `cut` are first-class consumers.
 
-use serde::Serialize;
+use deser::Serialize;
 use std::io::{IsTerminal, Write};
 
 /// Documented exit statuses. Anything a wrapper script needs to branch on has
@@ -130,7 +130,7 @@ impl Out {
     /// Write one record to stdout.
     pub fn emit<R: Record>(&self, record: &R) {
         let line = if self.json {
-            serde_json::to_string(record)
+            deser_json::to_string(record)
                 .expect("a record is plain data and always serializes")
         } else {
             record.text()
@@ -253,7 +253,7 @@ impl Record for RoomRecord {
 /// Something that happened in a room.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RoomEventRecord {
-    #[serde(rename = "type")]
+    #[deser(rename = "type")]
     pub kind: &'static str,
     pub room: String,
     pub user: String,
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn search_json_carries_every_field() {
-        let json = serde_json::to_value(search_record()).unwrap();
+        let json = deser_value::to_value(&search_record()).unwrap();
         assert_eq!(json["user"], "bob");
         assert_eq!(json["size"], 4096);
         assert_eq!(json["bitrate"], 320);
@@ -718,7 +718,7 @@ mod tests {
             message: "hi".into(),
         };
         assert_eq!(record.text(), "message\tlobby\tbob\thi");
-        let json = serde_json::to_value(&record).unwrap();
+        let json = deser_value::to_value(&record).unwrap();
         assert_eq!(json["type"], "message");
     }
 

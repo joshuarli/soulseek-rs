@@ -30,20 +30,8 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<toml::de::Error> for Error {
-    fn from(error: toml::de::Error) -> Self {
-        Self::msg(error.to_string())
-    }
-}
-
-impl From<toml::ser::Error> for Error {
-    fn from(error: toml::ser::Error) -> Self {
-        Self::msg(error.to_string())
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(error: serde_json::Error) -> Self {
+impl From<deser::Error> for Error {
+    fn from(error: deser::Error) -> Self {
         Self::msg(error.to_string())
     }
 }

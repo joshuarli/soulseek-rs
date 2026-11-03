@@ -18,7 +18,8 @@ use crate::daemon::proto::{
     SlotsParams, TransferRef, Uploads, UserRef, UserResult, Watched,
 };
 use mirror::Mirror;
-use serde::de::DeserializeOwned;
+use deser::de::DeserializeOwned;
+use deser_value::Value;
 use soulseek_rs::types::{Download, DownloadMetadata, RoomUserStats};
 use soulseek_rs::{
     DownloadStatus, Result, RoomEvent, SearchResult, SessionLoss,
@@ -75,7 +76,7 @@ impl std::fmt::Display for Endpoint {
 }
 
 /// Calls awaiting a reply, keyed by JSON-RPC id.
-type Answer = std::result::Result<serde_json::Value, RpcError>;
+type Answer = std::result::Result<Value, RpcError>;
 
 #[derive(Default)]
 struct Pending(Mutex<HashMap<u64, Sender<Answer>>>);
@@ -223,36 +224,36 @@ impl RemoteSession {
     }
 
     /// Send a request and wait for its reply.
-    fn request<P: serde::Serialize, R: DeserializeOwned>(
+    fn request<P: deser::Serialize, R: DeserializeOwned>(
         &self,
         method: Method,
         params: P,
     ) -> Result<R> {
         let value = self.call(method, params)?;
-        serde_json::from_value(value).map_err(|e| {
+        deser_value::from_value(&value).map_err(|e| {
             network(format!(
                 "the daemon's answer to {method} was unreadable: {e}"
             ))
         })
     }
 
-    fn call<P: serde::Serialize>(
+    fn call<P: deser::Serialize>(
         &self,
         method: Method,
         params: P,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<Value> {
         if self.closed.load(Ordering::Relaxed) {
             return Err(SoulseekRs::ConnectionClosed);
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = Request {
             jsonrpc: "2.0".to_string(),
-            id: Some(serde_json::json!(id)),
+            id: Some(deser_value::value!(id)),
             method: method.wire_name().to_string(),
-            params: serde_json::to_value(params)
+            params: deser_value::to_value(&params)
                 .map_err(|e| network(format!("cannot encode {method}: {e}")))?,
         };
-        let line = serde_json::to_string(&request)
+        let line = deser_json::to_string(&request)
             .map_err(|e| network(format!("cannot encode {method}: {e}")))?;
 
         let answer = self.pending.register(id);
@@ -278,7 +279,7 @@ impl RemoteSession {
     }
 
     /// A call whose reply carries nothing worth reading.
-    fn tell<P: serde::Serialize>(
+    fn tell<P: deser::Serialize>(
         &self,
         method: Method,
         params: P,
@@ -288,7 +289,7 @@ impl RemoteSession {
 
     /// A call whose reply is a yes or a no. A daemon that cannot answer is a
     /// "no": every caller of these already reads false as "nothing to do".
-    fn ask<P: serde::Serialize>(&self, method: Method, params: P) -> bool {
+    fn ask<P: deser::Serialize>(&self, method: Method, params: P) -> bool {
         self.request::<P, Ack>(method, params)
             .is_ok_and(|ack| ack.ok)
     }
@@ -430,7 +431,7 @@ fn read_loop(
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(response) = serde_json::from_str::<Response>(&line) else {
+        let Ok(response) = deser_json::from_str::<Response>(&line) else {
             soulseek_rs::warn!("ignoring an unreadable line from the daemon");
             continue;
         };
@@ -442,14 +443,14 @@ fn read_loop(
             continue;
         }
 
-        let Some(id) = response.id.as_ref().and_then(serde_json::Value::as_u64)
+        let Some(id) = response.id.as_ref().and_then(|id| id.as_u64())
         else {
             continue;
         };
         match (response.result, response.error) {
             (Some(result), _) => pending.settle(id, Ok(result)),
             (None, Some(error)) => pending.settle(id, Err(error)),
-            (None, None) => pending.settle(id, Ok(serde_json::Value::Null)),
+            (None, None) => pending.settle(id, Ok(Value::null())),
         }
     }
 }
@@ -871,10 +872,10 @@ mod tests {
     fn a_reply_settles_the_call_that_is_waiting_for_it() {
         let pending = Pending::default();
         let answer = pending.register(7);
-        pending.settle(7, Ok(serde_json::json!({ "ok": true })));
+        pending.settle(7, Ok(deser_value::value!({ "ok": true })));
         assert_eq!(
             answer.recv().unwrap().unwrap(),
-            serde_json::json!({ "ok": true })
+            deser_value::value!({ "ok": true })
         );
     }
 
@@ -883,7 +884,7 @@ mod tests {
         let pending = Pending::default();
         let answer = pending.register(7);
         pending.abandon(7);
-        pending.settle(7, Ok(serde_json::Value::Null));
+        pending.settle(7, Ok(Value::null()));
         assert!(answer.recv().is_err());
     }
 
@@ -915,7 +916,7 @@ mod tests {
 
         assert_eq!(
             answer.recv().unwrap().unwrap(),
-            serde_json::json!({ "ok": true })
+            deser_value::value!({ "ok": true })
         );
         assert_eq!(
             mirror.take_rooms(),

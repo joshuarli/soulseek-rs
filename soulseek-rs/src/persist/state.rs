@@ -7,8 +7,8 @@
 //! crash never leaves a torn file.
 
 use crate::error::Result;
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use deser::{Serialize, de::DeserializeOwned};
+use deser_value::Value;
 use soulseek_rs::{DownloadStatus, types::Download};
 use std::path::{Path, PathBuf};
 
@@ -16,7 +16,12 @@ use std::path::{Path, PathBuf};
 /// shapes in `load` — when one of them changes.
 const VERSION: u32 = 0;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+const PRETTY: deser_json::SerializerConfig =
+    deser_json::SerializerConfig::builder()
+        .pretty(deser_json::Indent::Spaces(2))
+        .build();
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, deser::Deserialize)]
 pub struct PersistedDownload {
     pub username: String,
     pub filename: String,
@@ -42,7 +47,7 @@ impl PersistedDownload {
 }
 
 /// One line of private-message history.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, deser::Deserialize)]
 pub struct PersistedMessage {
     pub peer: String,
     /// True when we sent it, false when the peer did.
@@ -117,20 +122,20 @@ fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
     let Ok(text) = std::fs::read_to_string(path) else {
         return T::default();
     };
-    let Ok(envelope) = serde_json::from_str::<Value>(&text) else {
+    let Ok(envelope) = deser_json::from_str::<Value>(&text) else {
         set_aside(path, "corrupt");
         return T::default();
     };
     let version = envelope
         .get("version")
-        .and_then(Value::as_u64)
+        .and_then(|value| value.as_u64())
         .unwrap_or(u64::MAX);
     if version > u64::from(VERSION) {
         set_aside(path, "from a newer version");
         return T::default();
     }
-    let data = envelope.get("data").cloned().unwrap_or(Value::Null);
-    serde_json::from_value(data).unwrap_or_else(|_| {
+    let data = envelope.get("data").cloned().unwrap_or(Value::null());
+    deser_value::from_value(&data).unwrap_or_else(|_| {
         set_aside(path, "unreadable");
         T::default()
     })
@@ -157,9 +162,12 @@ fn save<T: Serialize>(path: &Path, version: u32, data: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let envelope = serde_json::json!({ "version": version, "data": data });
+    let envelope = deser_value::value!({
+        "version": version,
+        "data": deser_value::to_value(data)?
+    });
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&envelope)?)?;
+    std::fs::write(&tmp, PRETTY.to_string(&envelope)?.into_bytes())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

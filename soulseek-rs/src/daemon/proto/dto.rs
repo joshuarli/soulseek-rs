@@ -5,7 +5,7 @@
 //! `soulseek-rs-lib` — a refactor there cannot silently change what a
 //! third-party script receives, and the compiler points here when one would.
 
-use serde::{Deserialize, Serialize};
+use deser::{Deserialize, Serialize};
 use soulseek_rs::types::{
     Download, DownloadMetadata, RoomUserStats, UserPresence, UserStats,
     UserStatus,
@@ -22,9 +22,11 @@ use std::collections::HashMap;
 pub struct AuthParams {
     /// Required on TCP. Omitted on a Unix socket, where the socket's own
     /// permissions already prove the caller is this user.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[deser(default, skip_serializing_if = Option::is_none)]
+    #[cfg_attr(test, schemars(default, skip_serializing_if = "Option::is_none"))]
     pub token: Option<String>,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub protocol: u32,
 }
 
@@ -99,7 +101,8 @@ impl From<SearchResultDto> for SearchResult {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[deser(tag = "state", rename_all = "snake_case")]
+#[cfg_attr(test, schemars(tag = "state", rename_all = "snake_case"))]
 pub enum DownloadStatusDto {
     Queued,
     InProgress {
@@ -180,13 +183,17 @@ impl From<DownloadStatusDto> for DownloadStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DownloadMetadataDto {
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub bitrate: Option<u32>,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub length_seconds: Option<u32>,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub peer_upload_speed: Option<u32>,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub peer_free_slots: Option<u8>,
 }
 
@@ -221,9 +228,11 @@ pub struct DownloadDto {
     pub size: u64,
     pub download_directory: String,
     pub status: DownloadStatusDto,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub queue_position: Option<u32>,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub metadata: DownloadMetadataDto,
 }
 
@@ -244,7 +253,8 @@ impl From<&Download> for DownloadDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[deser(tag = "state", rename_all = "snake_case")]
+#[cfg_attr(test, schemars(tag = "state", rename_all = "snake_case"))]
 pub enum UploadStatusDto {
     /// Waiting for a slot, at this 1-based place in the queue.
     Queued {
@@ -348,7 +358,8 @@ impl From<RoomInfoDto> for RoomInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[deser(tag = "event", rename_all = "snake_case")]
+#[cfg_attr(test, schemars(tag = "event", rename_all = "snake_case"))]
 pub enum RoomEventDto {
     List {
         rooms: Vec<RoomInfoDto>,
@@ -697,9 +708,11 @@ impl From<RoomUserStatsDto> for RoomUserStats {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct UserInfoDto {
     pub username: String,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub presence: Option<UserPresenceDto>,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub stats: Option<UserStatsDto>,
 }
 
@@ -843,7 +856,8 @@ impl From<UserMessageDto> for UserMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
+#[deser(rename_all = "snake_case")]
+#[cfg_attr(test, schemars(rename_all = "snake_case"))]
 pub enum SessionLossDto {
     Displaced,
     Disconnected,
@@ -875,12 +889,14 @@ pub struct DaemonStatus {
     pub server: String,
     pub daemon_version: String,
     pub protocol: u32,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub listen_port: Option<u16>,
     pub shared_folders: u32,
     pub shared_files: u32,
     pub download_dir: String,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub session_loss: Option<SessionLossDto>,
     /// Control connections currently attached.
     pub clients: usize,

@@ -5,7 +5,7 @@ use super::dto::{
     DownloadDto, DownloadMetadataDto, DownloadStatusDto, SearchResultDto,
     SessionLossDto, SharedDirectoryDto, UploadInfoDto, UserInfoDto,
 };
-use serde::{Deserialize, Serialize};
+use deser::{Deserialize, Serialize};
 
 /// A void result. JSON-RPC allows a null result, but an object leaves room to
 /// add a field later without changing the shape a client already parses.
@@ -64,9 +64,11 @@ pub struct MessageParams {
 pub struct DownloadStartParams {
     pub username: String,
     pub filename: String,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub size: u64,
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub metadata: DownloadMetadataDto,
 }
 
@@ -186,14 +188,16 @@ pub struct Messages {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct UserResult {
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub user: Option<UserInfoDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Seconds {
-    #[serde(default)]
+    #[deser(default)]
+    #[cfg_attr(test, schemars(default))]
     pub seconds: Option<u32>,
 }
 

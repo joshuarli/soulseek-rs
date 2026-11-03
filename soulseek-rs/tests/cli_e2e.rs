@@ -109,8 +109,8 @@ fn records(output: &Output) -> Vec<String> {
 }
 
 /// The first record of a `--json` run, parsed.
-fn json_record(output: &Output) -> serde_json::Value {
-    serde_json::from_str(records(output).first().expect("one record"))
+fn json_record(output: &Output) -> deser_value::Value {
+    deser_json::from_str(records(output).first().expect("one record"))
         .expect("valid JSON")
 }
 
@@ -265,7 +265,7 @@ fn portmap_emits_a_record_whose_verdict_matches_the_exit_code() {
     let output = run(&["--no-config", "--quiet", "--json", "portmap"]);
     let record = json_record(&output);
 
-    assert!(record["port"].is_number());
+    assert!(record["port"].as_u64().is_some());
     let ok = record["ok"].as_bool().expect("ok should be a boolean");
     // Whether a router answers depends on the network, but the exit code and
     // the record must always agree.
@@ -478,9 +478,9 @@ fn a_wish_holding_a_comma_survives_the_config_file() {
 
     with_config(&config, &["wish", "add", "autechre, incunabula"]);
     let listed = with_config(&config, &["--json", "wish", "list"]);
-    let stored: Vec<serde_json::Value> = records(&listed)
+    let stored: Vec<deser_value::Value> = records(&listed)
         .iter()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| deser_json::from_str(line).ok())
         .collect();
     assert_eq!(stored.len(), 1, "one wish, not two split on the comma");
     assert_eq!(stored[0]["query"], "autechre, incunabula");
@@ -1002,10 +1002,10 @@ fn search_json_records_carry_the_fields_a_filter_needs() {
     );
     assert_eq!(code(&output), EXIT_OK, "stderr: {}", stderr(&output));
 
-    let record: serde_json::Value = records(&output)
+    let record: deser_value::Value = records(&output)
         .iter()
         .map(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
+            deser_json::from_str::<deser_value::Value>(line)
                 .expect("each line should be valid JSON")
         })
         .find(|value| {
@@ -1015,7 +1015,7 @@ fn search_json_records_carry_the_fields_a_filter_needs() {
 
     assert_eq!(record["user"], "cli_e2e_sharer_b");
     assert_eq!(record["size"], probe_bytes().len() as u64);
-    assert!(record["free_slot"].is_boolean());
+    assert!(record["free_slot"].as_bool().is_some());
     assert!(record.get("speed").is_some());
 }
 
@@ -1943,9 +1943,9 @@ fn room_listen_streams_what_is_said_in_the_room() {
     let output = child.wait_with_output().expect("the binary should finish");
     assert_eq!(code(&output), EXIT_OK, "stderr: {}", stderr(&output));
 
-    let events: Vec<serde_json::Value> = records(&output)
+    let events: Vec<deser_value::Value> = records(&output)
         .iter()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| deser_json::from_str(line).ok())
         .collect();
 
     let said = events
@@ -2028,7 +2028,7 @@ fn message_read_streams_incoming_private_messages() {
     assert_eq!(code(&output), EXIT_OK, "stderr: {}", stderr(&output));
 
     let read = records(&output).iter().any(|line| {
-        serde_json::from_str::<serde_json::Value>(line).is_ok_and(|value| {
+        deser_json::from_str::<deser_value::Value>(line).is_ok_and(|value| {
             value["message"] == "inbox line"
                 && value["user"] == "cli_e2e_pm_sender"
         })
@@ -2073,7 +2073,7 @@ fn whoami_reports_how_much_privilege_time_the_account_has() {
     // Null would mean it never said, which is a different fact.
     assert_eq!(
         record["privilege_seconds"], 0,
-        "a plain account should read as zero seconds, got {record}"
+        "a plain account should read as zero seconds, got {record:?}"
     );
 }
 
@@ -2156,7 +2156,7 @@ fn serve_reports_a_queued_upload_once_the_slots_are_full() {
     let uploaded = serving.wait_with_output().expect("serve should finish");
     let statuses: Vec<String> = stdout(&uploaded)
         .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|line| deser_json::from_str::<deser_value::Value>(line).ok())
         .filter_map(|value| {
             value["status"]
                 .as_str()
@@ -2286,9 +2286,9 @@ fn serve_stays_online_and_reports_an_upload_a_peer_pulls() {
 
     // The download may take the browse path for its remote name; what this
     // test pins is that serve REPORTED the upload it served.
-    let uploads: Vec<serde_json::Value> = records(&output)
+    let uploads: Vec<deser_value::Value> = records(&output)
         .iter()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| deser_json::from_str(line).ok())
         .collect();
     assert!(
         !uploads.is_empty(),
@@ -2308,7 +2308,7 @@ fn serve_stays_online_and_reports_an_upload_a_peer_pulls() {
     for key in ["status", "user", "path", "bytes_sent", "size", "speed"] {
         assert!(
             last.get(key).is_some(),
-            "serve should carry `{key}`: {last}"
+            "serve should carry `{key}`: {last:?}"
         );
     }
 }
@@ -2381,7 +2381,7 @@ fn shares_files_lists_the_index_as_a_peer_would_receive_it() {
     let paths: Vec<String> = records(&listed)
         .iter()
         .map(|line| {
-            serde_json::from_str::<serde_json::Value>(line).expect("JSON")
+            deser_json::from_str::<deser_value::Value>(line).expect("JSON")
                 ["path"]
                 .as_str()
                 .expect("a path")
@@ -2512,9 +2512,9 @@ fn config_set_writes_a_value_that_get_reads_back() {
 
     // And the next run actually starts from it.
     let listed = with_config(&config, &["--json", "config", "list"]);
-    let values: Vec<serde_json::Value> = records(&listed)
+    let values: Vec<deser_value::Value> = records(&listed)
         .iter()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| deser_json::from_str(line).ok())
         .collect();
     assert!(
         values
@@ -2653,7 +2653,7 @@ fn json_mode_keeps_stdout_pure_for_every_command() {
 
         for line in stdout(&output).lines() {
             assert!(
-                serde_json::from_str::<serde_json::Value>(line).is_ok(),
+                deser_json::from_str::<deser_value::Value>(line).is_ok(),
                 "`{}` put a non-JSON line on stdout: {line:?}",
                 case.join(" ")
             );
@@ -2724,7 +2724,7 @@ fn assert_record_keys(output: &Output, label: &str, keys: &[&str]) {
     for key in keys {
         assert!(
             record.get(*key).is_some(),
-            "`{label}` should carry `{key}`, got {record}"
+            "`{label}` should carry `{key}`, got {record:?}"
         );
     }
 }
@@ -3482,7 +3482,7 @@ fn a_daemon_reports_its_session_and_stops_on_request() {
     assert_eq!(record["server"], server.address());
     assert!(
         record["clients"].as_u64().is_some_and(|n| n >= 1),
-        "the asking client counts as attached: {record}"
+        "the asking client counts as attached: {record:?}"
     );
 
     let stopped = run(&["--no-config", "--daemon", &at, "daemon", "stop"]);
@@ -3580,15 +3580,15 @@ fn adding_a_share_takes_effect_on_a_running_daemon() {
         "status",
     ]));
     let listed = after["directories"]
-        .as_array()
+        .as_seq()
         .expect("directories is an array");
     assert!(
         listed.iter().any(|d| d == &share.display()),
-        "the daemon should be sharing the folder that was just added: {after}"
+        "the daemon should be sharing the folder that was just added: {after:?}"
     );
     assert!(
         after["files"].as_u64().is_some_and(|files| files >= 1),
-        "and should have indexed what is in it: {after}"
+        "and should have indexed what is in it: {after:?}"
     );
 }
 
@@ -3663,11 +3663,11 @@ fn setting_the_download_folder_takes_effect_on_a_running_daemon() {
     let indexed = json_record(&listing);
     assert!(
         indexed["directories"]
-            .as_array()
+            .as_seq()
             .expect("directories is an array")
             .iter()
             .any(|d| d == &offered.display()),
-        "the daemon should serve the folder the config now names: {indexed}"
+        "the daemon should serve the folder the config now names: {indexed:?}"
     );
 
     // ...and the next transfer actually lands there.

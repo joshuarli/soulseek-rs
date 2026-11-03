@@ -20,8 +20,8 @@ use super::proto::{
 use crate::api::SessionApi;
 use crate::output::Exit;
 use crate::persist::secret::SecretStore;
-use serde::de::DeserializeOwned;
-use serde_json::Value;
+use deser::de::DeserializeOwned;
+use deser_value::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -74,7 +74,7 @@ impl Daemon {
                 self.stop.store(true, Ordering::Relaxed);
                 ok(Ack::OK)
             }
-            Method::RpcDiscover => serde_json::from_str(OPENRPC).map_err(|e| {
+            Method::RpcDiscover => deser_json::from_str(OPENRPC).map_err(|e| {
                 RpcError::new(
                     CODE_APPLICATION,
                     format!("the contract is unreadable: {e}"),
@@ -550,8 +550,8 @@ impl Daemon {
     }
 }
 
-fn ok<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
-    serde_json::to_value(value).map_err(|e| {
+fn ok<T: deser::Serialize>(value: T) -> Result<Value, RpcError> {
+    deser_value::to_value(&value).map_err(|e| {
         RpcError::new(
             CODE_APPLICATION,
             format!("cannot serialize the reply: {e}"),
@@ -560,7 +560,7 @@ fn ok<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
 }
 
 fn parse<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {
-    serde_json::from_value(params)
+    deser_value::from_value(&params)
         .map_err(|e| RpcError::new(CODE_INVALID_PARAMS, e.to_string()))
 }
 
@@ -582,7 +582,7 @@ mod tests {
     use super::super::proto::{CODE_METHOD_NOT_FOUND, CODE_PARSE};
     use super::transport::{accepts, answer, constant_time_eq};
     use super::*;
-    use serde_json::json;
+    use deser_value::value;
     use std::sync::mpsc::Receiver;
 
     #[test]
@@ -649,7 +649,7 @@ mod tests {
     fn bad_params_are_reported_as_such() {
         let daemon = daemon_with_token("t");
         let error = daemon
-            .call(Method::RoomJoin, json!({ "not_a_room": 1 }))
+            .call(Method::RoomJoin, value!({ "not_a_room": 1 }))
             .expect_err("the params do not match");
         assert_eq!(error.code, CODE_INVALID_PARAMS);
     }
@@ -658,12 +658,12 @@ mod tests {
     fn discover_serves_the_published_contract() {
         let daemon = daemon_with_token("t");
         let document = daemon
-            .call(Method::RpcDiscover, Value::Null)
+            .call(Method::RpcDiscover, Value::null())
             .expect("the contract is compiled in");
         assert_eq!(document["openrpc"], "1.3.2");
         assert!(
             document["methods"]
-                .as_array()
+                .as_seq()
                 .is_some_and(|methods| methods.len()
                     == Method::ALL.len()
                         + super::super::proto::Event::ALL.len()),
@@ -675,7 +675,7 @@ mod tests {
     fn member_stats_are_published_for_a_joined_room() {
         let daemon = daemon_with_token("t");
         let stats = daemon
-            .call(Method::RoomMemberStats, json!({ "room": STUB_ROOM }))
+            .call(Method::RoomMemberStats, value!({ "room": STUB_ROOM }))
             .expect("member stats");
         assert_eq!(stats["members"][0]["username"], "alice");
         assert_eq!(stats["members"][0]["status"], "online");
@@ -689,9 +689,9 @@ mod tests {
         // an ordinary thing for a client to do.
         let daemon = daemon_with_token("t");
         let stats = daemon
-            .call(Method::RoomMemberStats, json!({ "room": "elsewhere" }))
+            .call(Method::RoomMemberStats, value!({ "room": "elsewhere" }))
             .expect("member stats");
-        assert_eq!(stats["members"], json!([]));
+        assert_eq!(stats["members"], value!([]));
     }
 
     /// The daemon owns the login, so a password it changes it also stores —
@@ -703,7 +703,7 @@ mod tests {
         let daemon = daemon_with("t", Arc::clone(&session));
 
         daemon
-            .call(Method::AccountPassword, json!({ "password": "hunter2" }))
+            .call(Method::AccountPassword, value!({ "password": "hunter2" }))
             .expect("the password change is served");
 
         assert_eq!(
@@ -725,26 +725,26 @@ mod tests {
         // The three methods are only useful together: what `user.watch`
         // records, `user.watched` must report, and `user.unwatch` must undo.
         let daemon = daemon_with_token("t");
-        let user = |name: &str| json!({ "username": name });
+        let user = |name: &str| value!({ "username": name });
 
         daemon
             .call(Method::UserWatch, user("alice"))
             .expect("watch");
         daemon.call(Method::UserWatch, user("bob")).expect("watch");
         let watched = daemon
-            .call(Method::UserWatched, Value::Null)
+            .call(Method::UserWatched, Value::null())
             .expect("watched");
-        assert_eq!(watched["users"], json!(["alice", "bob"]));
+        assert_eq!(watched["users"], value!(["alice", "bob"]));
 
         daemon
             .call(Method::UserUnwatch, user("alice"))
             .expect("unwatch");
         let watched = daemon
-            .call(Method::UserWatched, Value::Null)
+            .call(Method::UserWatched, Value::null())
             .expect("watched");
         assert_eq!(
             watched["users"],
-            json!(["bob"]),
+            value!(["bob"]),
             "unwatching one must not clear the rest"
         );
     }
@@ -752,15 +752,15 @@ mod tests {
     #[test]
     fn watching_the_same_user_twice_lists_them_once() {
         let daemon = daemon_with_token("t");
-        let alice = json!({ "username": "alice" });
+        let alice = value!({ "username": "alice" });
         daemon
             .call(Method::UserWatch, alice.clone())
             .expect("watch");
         daemon.call(Method::UserWatch, alice).expect("watch");
         let watched = daemon
-            .call(Method::UserWatched, Value::Null)
+            .call(Method::UserWatched, Value::null())
             .expect("watched");
-        assert_eq!(watched["users"], json!(["alice"]));
+        assert_eq!(watched["users"], value!(["alice"]));
     }
 
     #[test]
@@ -768,7 +768,7 @@ mod tests {
         let daemon = daemon_with_token("t");
         assert!(!daemon.stop.load(Ordering::Relaxed));
         daemon
-            .call(Method::DaemonStop, Value::Null)
+            .call(Method::DaemonStop, Value::null())
             .expect("stop is always accepted");
         assert!(daemon.stop.load(Ordering::Relaxed));
     }

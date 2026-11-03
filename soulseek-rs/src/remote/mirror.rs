@@ -10,6 +10,7 @@ use crate::daemon::proto::{
     BrowseEvent, DownloadStatusEvent, Event, RoomEventDto, SessionLossEvent,
     UploadInfoDto, UserMessageDto,
 };
+use deser_value::Value;
 use soulseek_rs::{
     DownloadStatus, RoomEvent, SessionLoss, SharedDirectory, UploadInfo,
     UserMessage,
@@ -50,7 +51,7 @@ impl Mirror {
     /// File one pushed event. Anything unparseable is dropped with a warning
     /// rather than killing the connection: a newer daemon may legitimately
     /// send a shape this client does not know yet.
-    pub fn apply(&self, event: Event, params: serde_json::Value) {
+    pub fn apply(&self, event: Event, params: Value) {
         let Ok(mut buffers) = self.0.lock() else {
             return;
         };
@@ -188,11 +189,11 @@ fn push<T>(buffer: &mut Vec<T>, item: T) {
     buffer.push(item);
 }
 
-fn parse<T: serde::de::DeserializeOwned>(
+fn parse<T: deser::de::DeserializeOwned>(
     event: Event,
-    params: serde_json::Value,
+    params: Value,
 ) -> Result<T, ()> {
-    serde_json::from_value(params).map_err(|e| {
+    deser_value::from_value(&params).map_err(|e| {
         soulseek_rs::warn!("ignoring an unreadable {event} event: {e}");
     })
 }
@@ -201,12 +202,12 @@ fn parse<T: serde::de::DeserializeOwned>(
 mod tests {
     use super::*;
     use crate::daemon::proto::DownloadStatusDto;
-    use serde_json::json;
+    use deser_value::value;
 
     #[test]
     fn a_room_event_is_delivered_once_and_then_gone() {
         let mirror = Mirror::default();
-        mirror.apply(Event::Room, json!({ "event": "left", "room": "lobby" }));
+        mirror.apply(Event::Room, value!({ "event": "left", "room": "lobby" }));
 
         assert_eq!(
             mirror.take_rooms(),
@@ -225,7 +226,7 @@ mod tests {
         let mirror = Mirror::default();
         mirror.apply(
             Event::Browse,
-            json!({
+            value!({
                 "username": "bob",
                 "directories": [{
                     "name": "@@x",
@@ -250,7 +251,7 @@ mod tests {
 
         mirror.apply(
             Event::DownloadStatus,
-            serde_json::to_value(DownloadStatusEvent {
+            deser_value::to_value(&DownloadStatusEvent {
                 username: "bob".into(),
                 filename: "a.mp3".into(),
                 status: DownloadStatusDto::Queued,
@@ -271,7 +272,7 @@ mod tests {
         {
             mirror.apply(
                 Event::DownloadStatus,
-                serde_json::to_value(DownloadStatusEvent {
+                deser_value::to_value(&DownloadStatusEvent {
                     username: "bob".into(),
                     filename: "a.mp3".into(),
                     status,
@@ -292,7 +293,7 @@ mod tests {
         let mirror = Mirror::default();
         mirror.apply(
             Event::DownloadStatus,
-            serde_json::to_value(DownloadStatusEvent {
+            deser_value::to_value(&DownloadStatusEvent {
                 username: "nobody".into(),
                 filename: "x.mp3".into(),
                 status: DownloadStatusDto::Completed,
@@ -305,8 +306,8 @@ mod tests {
     fn the_first_session_loss_is_the_one_reported() {
         let mirror = Mirror::default();
         assert!(mirror.loss().is_none());
-        mirror.apply(Event::SessionLoss, json!({ "loss": "displaced" }));
-        mirror.apply(Event::SessionLoss, json!({ "loss": "disconnected" }));
+        mirror.apply(Event::SessionLoss, value!({ "loss": "displaced" }));
+        mirror.apply(Event::SessionLoss, value!({ "loss": "disconnected" }));
         assert_eq!(
             mirror.loss(),
             Some(SessionLoss::Displaced),
@@ -323,7 +324,7 @@ mod tests {
         for _ in 0..(BUFFER_LIMIT + 50) {
             mirror.apply(
                 Event::Room,
-                json!({ "event": "left", "room": "lobby" }),
+                value!({ "event": "left", "room": "lobby" }),
             );
         }
         assert_eq!(mirror.take_rooms().len(), BUFFER_LIMIT);
@@ -349,7 +350,7 @@ mod tests {
         // A newer daemon may send a shape this client does not know. Dropping
         // one event beats dropping the connection.
         let mirror = Mirror::default();
-        mirror.apply(Event::Room, json!({ "event": "invented" }));
+        mirror.apply(Event::Room, value!({ "event": "invented" }));
         assert!(mirror.take_rooms().is_empty());
     }
 }

@@ -12,7 +12,7 @@ use super::super::proto::{
 };
 use super::Daemon;
 use crate::output::Exit;
-use serde_json::Value;
+use deser_value::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -301,7 +301,7 @@ fn authenticate(
     let Ok(Some(line)) = read_line(reader) else {
         return false;
     };
-    let request: Request = match serde_json::from_str(&line) {
+    let request: Request = match deser_json::from_str(&line) {
         Ok(request) => request,
         Err(e) => {
             let _ = out.send(Response::failure(
@@ -324,7 +324,7 @@ fn authenticate(
     }
 
     let params: AuthParams =
-        serde_json::from_value(request.params).unwrap_or_default();
+        deser_value::from_value(&request.params).unwrap_or_default();
     if !accepts(daemon, trusted, params.token.as_deref()) {
         std::thread::sleep(AUTH_FAILURE_DELAY);
         let _ = out.send(Response::failure(
@@ -334,7 +334,7 @@ fn authenticate(
         return false;
     }
 
-    let result = serde_json::to_value(daemon.identify()).unwrap_or(Value::Null);
+    let result = deser_value::to_value(&daemon.identify()).unwrap_or(Value::null());
     let _ = out.send(Response::result(request.id, result));
     true
 }
@@ -367,7 +367,7 @@ pub(super) fn constant_time_eq(left: &str, right: &str) -> bool {
 /// Turn one request line into the reply it deserves, or `None` for a
 /// notification, which by JSON-RPC rule is answered with silence.
 pub(super) fn answer(line: &str, daemon: &Daemon) -> Option<Response> {
-    let request: Request = match serde_json::from_str(line) {
+    let request: Request = match deser_json::from_str(line) {
         Ok(request) => request,
         Err(e) => {
             return Some(Response::failure(
@@ -399,7 +399,7 @@ pub(super) fn answer(line: &str, daemon: &Daemon) -> Option<Response> {
 fn write_loop(stream: Stream, outbox: &Receiver<Response>) {
     let mut stream = stream;
     for response in outbox {
-        let Ok(line) = serde_json::to_string(&response) else {
+        let Ok(line) = deser_json::to_string(&response) else {
             continue;
         };
         if writeln!(stream, "{line}").is_err() || stream.flush().is_err() {
