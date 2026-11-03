@@ -22,3 +22,9 @@ pub(crate) mod ui;
 /// Hidden from the documented API: it is a harness door, not a contract.
 #[doc(hidden)]
 pub use ui::MainTui;
+
+/// The deterministic session the PTY fixture binary renders, built only with
+/// the `fixtures` feature.
+#[cfg(feature = "fixtures")]
+#[doc(hidden)]
+pub use ui::fixture::FixtureSession;

@@ -2,3 +2,6 @@
 
 # Editor and assistant scratch, not repository content
 .claude/
+
+# PTY failure bundles written beside the package manifest
+/soulseek-rs/target/

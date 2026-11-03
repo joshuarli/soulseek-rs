@@ -1,4 +1,6 @@
 mod downloads;
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixture;
 pub mod login;
 mod main_tui;
 mod paging;

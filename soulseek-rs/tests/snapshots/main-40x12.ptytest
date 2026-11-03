@@ -1,0 +1,75 @@
+size: columns=40 rows=12
+cursor: row=11 column=40 visible=false
+modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
+00│╭·Status···daemon·127.0.0.1:5030·──────╮
+01││·soulseek-rs·🦀›·v19···················│
+02│╰──────────────────────────────────────╯
+03│╭·[2]·Results·─────────────────────────╮
+04│╰──────────────────────────────────────╯
+05│╭·[1]·Sea╮╭·[3]·Downloads/Up╮╭·[Info]·─╮
+06│╰────────╯╰─────────────────╯╰─────────╯
+07│╭·Shortcuts···Sharing:·/home/tester/Mus╮
+08││·[s·→·search]·[S·→·search·again]······│
+09││·[Enter·→·results]·[d·→·remove]·······│
+10││·[C·→·clear·all]·[m·→·message]········│
+11│╰──────────────────────────────────────╯
+attr: row=0 columns=0..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=1 columns=0..1 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=1 columns=2..13 fg=Rgb(232, 225, 214) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=1 columns=13..15 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=1 columns=16..20 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=1 columns=39..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=2 columns=0..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=0..1 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=1..5 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=3 columns=5..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=4 columns=0..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=0..1 fg=Rgb(127, 182, 133) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=1..5 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=5..9 fg=Rgb(127, 182, 133) bg=Default bold=true dim=false italic=false underline=false inverse=false
+attr: row=5 columns=9..10 fg=Rgb(127, 182, 133) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=10..11 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=11..15 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=15..30 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=30..37 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=5 columns=37..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=6 columns=0..10 fg=Rgb(127, 182, 133) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=6 columns=10..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=7 columns=0..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=0..1 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=2..3 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=3..4 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=4..7 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=7..13 fg=Rgb(201, 193, 180) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=13..14 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=15..16 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=16..17 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=17..20 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=20..32 fg=Rgb(201, 193, 180) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=32..33 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=8 columns=39..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=0..1 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=2..3 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=3..8 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=8..11 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=11..18 fg=Rgb(201, 193, 180) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=18..19 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=20..21 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=21..22 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=22..25 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=25..31 fg=Rgb(201, 193, 180) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=31..32 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=9 columns=39..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=0..1 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=2..3 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=3..4 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=4..7 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=7..16 fg=Rgb(201, 193, 180) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=16..17 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=18..19 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=19..20 fg=Rgb(110, 157, 201) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=20..23 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=23..30 fg=Rgb(201, 193, 180) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=30..31 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=10 columns=39..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
+attr: row=11 columns=0..40 fg=Rgb(138, 129, 120) bg=Default bold=false dim=false italic=false underline=false inverse=false
