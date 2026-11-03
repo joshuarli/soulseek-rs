@@ -7,7 +7,7 @@ use crate::ui::{
     page_window, pane_block, pane_title, primary_style, render_page,
     row_highlight_style, success_style, warning_style,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::{Constraint, Rect},
     widgets::{Cell, HighlightSpacing, Paragraph, Row, Table, TableState},

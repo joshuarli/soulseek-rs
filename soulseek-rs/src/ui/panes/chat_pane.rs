@@ -3,7 +3,7 @@ use crate::ui::{
     accent_style, border_style, dimmed_style, filter_title, highlight_style,
     info_style, primary_style, wrap_chat_line,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},

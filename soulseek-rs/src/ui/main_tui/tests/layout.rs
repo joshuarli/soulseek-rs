@@ -209,9 +209,9 @@ fn a_click_where_a_pane_just_hid_does_not_focus_it() {
     tui.state.focused_pane = FocusedPane::Searches;
     press(&mut tui, KeyCode::Char('w'));
     assert_eq!(tui.state.focused_pane, FocusedPane::Results);
-    tui.handle_mouse_event(ratatui::crossterm::event::MouseEvent {
-        kind: ratatui::crossterm::event::MouseEventKind::Down(
-            ratatui::crossterm::event::MouseButton::Left,
+    tui.handle_mouse_event(crate::ui::tui::event::MouseEvent {
+        kind: crate::ui::tui::event::MouseEventKind::Down(
+            crate::ui::tui::event::MouseButton::Left,
         ),
         column: searches.x + 1,
         row: searches.y + 1,
@@ -282,9 +282,9 @@ fn clicking_where_a_hidden_pane_was_focuses_whatever_is_there_now() {
     let mut tui = furnished_tui();
     let _ = screen_of(&mut tui);
     let searches = tui.state.searches_pane_area.expect("laid out");
-    let inside = ratatui::crossterm::event::MouseEvent {
-        kind: ratatui::crossterm::event::MouseEventKind::Down(
-            ratatui::crossterm::event::MouseButton::Left,
+    let inside = crate::ui::tui::event::MouseEvent {
+        kind: crate::ui::tui::event::MouseEventKind::Down(
+            crate::ui::tui::event::MouseButton::Left,
         ),
         column: searches.x + 1,
         row: searches.y + 1,
@@ -340,7 +340,7 @@ fn dragging_the_border_under_results_resizes_its_row() {
 
 #[test]
 fn dragging_a_row_panes_right_edge_gives_it_width() {
-    use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+    use crate::ui::tui::event::{MouseButton, MouseEventKind};
 
     let mut tui = furnished_tui();
     let _ = screen_of(&mut tui);

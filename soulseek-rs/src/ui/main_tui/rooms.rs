@@ -1,7 +1,7 @@
 use super::MainTui;
 use super::input::{FilterEdit, edit_filter, jumped, list_jump, scroll_log};
 use crate::models::{ChatFilter, RoomsView};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::ui::tui::event::{KeyCode, KeyEvent, KeyModifiers};
 
 impl MainTui {
     /// Open the chat-rooms popup and refresh the room list. If rooms are

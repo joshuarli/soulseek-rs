@@ -1,10 +1,10 @@
 //! How a pane's table shows one page of a list that may run to tens of
-//! thousands of rows: which rows those are, and how ratatui is handed just
+//! thousands of rows: which rows those are, and how the table is handed just
 //! those. Paging and drawing both count rows here, so they agree on what a
 //! page is.
 
 use crate::ui::pane_block;
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::Rect,
     widgets::{Table, TableState},
@@ -59,9 +59,9 @@ pub fn render_page(
     *state.offset_mut() = start;
 }
 
-/// The page a `height`-tall table shows, by ratatui's rule (its
-/// `visible_rows` is private): the offset, moved only as far as keeps the
-/// selection in view. A selection past the end counts as the last row.
+/// The page a `height`-tall table shows: the offset, moved only as far as
+/// keeps the selection in view. A selection past the end counts as the last
+/// row.
 fn visible_range(
     offset: usize,
     selected: Option<usize>,
@@ -82,7 +82,7 @@ fn visible_range(
 #[cfg(test)]
 mod tests {
     use super::{page_window, visible_range};
-    use ratatui::{layout::Rect, widgets::TableState};
+    use crate::ui::tui::{layout::Rect, widgets::TableState};
 
     #[test]
     fn the_page_follows_the_selection_and_is_never_longer_than_the_pane() {

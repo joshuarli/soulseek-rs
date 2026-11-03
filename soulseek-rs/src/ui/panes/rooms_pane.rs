@@ -7,7 +7,7 @@ use crate::ui::{
     highlight_style, info_style, page_window, pane_block, plain_title,
     primary_style, render_page, row_highlight_style, wrap_chat_line,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::Modifier,

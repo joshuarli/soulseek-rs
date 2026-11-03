@@ -1,7 +1,7 @@
 use super::MainTui;
 use super::input::{FilterEdit, edit_filter, jumped, list_jump};
 use crate::models::BrowseStatus;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::ui::tui::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{thread, time::Duration};
 
 /// How long to wait for a browse response before showing a timeout notice.

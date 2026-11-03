@@ -460,17 +460,14 @@ pub fn init_logging(cli: &Cli) {
     }
 }
 
-/// Clear the screen, turn on mouse reporting and take over the terminal.
-fn enter_terminal() -> ratatui::DefaultTerminal {
-    use ratatui::crossterm::{
-        event::EnableMouseCapture,
-        execute,
-        terminal::{Clear, ClearType},
-    };
-
-    let _ =
-        execute!(std::io::stdout(), Clear(ClearType::All), EnableMouseCapture);
-    ratatui::init()
+/// Take over the terminal: raw input, alternate screen and mouse reporting.
+fn enter_terminal() -> CliResult<crate::ui::tui::DefaultTerminal> {
+    crate::ui::tui::Terminal::enter().map_err(|error| {
+        CliError::new(
+            Exit::Failure,
+            format!("could not start the terminal: {error}"),
+        )
+    })
 }
 
 /// Run the interactive TUI (the default no-subcommand path): bring the
@@ -526,7 +523,7 @@ fn run_default_tui(
         // Enable logger buffering BEFORE connection to prevent log artifacts.
         // The window turns it off again when it gives the terminal back.
         soulseek_rs::utils::logger::enable_buffering();
-        let mut terminal = enter_terminal();
+        let mut terminal = enter_terminal()?;
 
         let outcome = crate::ui::login::run_login_flow(
             &mut terminal,
@@ -591,7 +588,7 @@ fn run_default_tui(
 
 /// Give the terminal back and let logging through again, on the way out.
 fn leave_terminal(result: CliResult) -> CliResult {
-    ratatui::restore();
+    let _ = crate::ui::tui::restore_terminal();
     soulseek_rs::utils::logger::disable_buffering();
     result
 }
@@ -635,7 +632,7 @@ fn run_attached_tui(
         })?;
 
     soulseek_rs::utils::logger::enable_buffering();
-    let terminal = enter_terminal();
+    let terminal = enter_terminal()?;
 
     // No StateStore: the daemon owns what survives a restart, so a second
     // writer here would fight it for the same files.

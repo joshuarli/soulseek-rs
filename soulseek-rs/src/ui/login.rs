@@ -10,9 +10,9 @@ use crate::ui::{
     info_style, mask, pane_block, primary_style, title_style, warning_style,
 };
 use crate::error::Result;
-use ratatui::{
+use crate::ui::tui::{
     DefaultTerminal, Frame,
-    crossterm::event::{
+    event::{
         self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll,
     },
     layout::{Constraint, Flex, Layout, Rect},
@@ -382,7 +382,7 @@ fn render(frame: &mut Frame, form: &LoginForm, spinner: &str) {
                 message.clone(),
                 error_style(),
             )))
-            .wrap(ratatui::widgets::Wrap { trim: true })
+            .wrap(crate::ui::tui::widgets::Wrap { trim: true })
         }
     };
     frame.render_widget(status, rows[3]);

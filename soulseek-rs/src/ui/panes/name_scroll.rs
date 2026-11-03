@@ -3,7 +3,7 @@
 //! lives here and each pane only says which of its columns it applies to.
 
 use crate::ui::{HIGHLIGHT_SYMBOL, pane_block};
-use ratatui::{
+use crate::ui::tui::{
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
 };

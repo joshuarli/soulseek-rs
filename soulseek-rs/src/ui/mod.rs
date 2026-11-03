@@ -6,6 +6,7 @@ mod main_tui;
 mod paging;
 mod panes;
 mod styles;
+pub mod tui;
 mod utils;
 
 pub use downloads::render_download_stats;

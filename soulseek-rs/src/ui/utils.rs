@@ -1,4 +1,4 @@
-use ratatui::{
+use crate::ui::tui::{
     style::Style,
     text::{Line, Span},
 };

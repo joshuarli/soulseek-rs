@@ -4,7 +4,7 @@
 //! one the program uses, so the fixture exercises raw mode, the alternate
 //! screen and mouse reporting rather than a test backend.
 
-use soulseek_rs_tui::{FixtureSession, MainTui};
+use soulseek_rs_tui::{FixtureSession, MainTui, Terminal};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,14 +19,13 @@ fn main() -> std::process::ExitCode {
         None,
     );
 
-    let _ = ratatui::crossterm::execute!(
-        std::io::stdout(),
-        ratatui::crossterm::terminal::Clear(
-            ratatui::crossterm::terminal::ClearType::All
-        ),
-        ratatui::crossterm::event::EnableMouseCapture,
-    );
-    let terminal = ratatui::init();
+    let terminal = match Terminal::enter() {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            eprintln!("tui fixture: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     match tui.run(terminal) {
         Ok(_) => std::process::ExitCode::SUCCESS,
         Err(error) => {

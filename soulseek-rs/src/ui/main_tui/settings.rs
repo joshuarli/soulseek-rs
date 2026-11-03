@@ -5,7 +5,7 @@
 use super::MainTui;
 use crate::models::{AccountInfo, SettingsAction, SettingsState};
 use crate::persist::secret::FileStore;
-use ratatui::crossterm::event::KeyEvent;
+use crate::ui::tui::event::KeyEvent;
 
 impl MainTui {
     pub(super) fn open_settings(&mut self) {

@@ -1,8 +1,8 @@
 // Reusable styles and colors for consistent UI appearance
 
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Padding};
+use crate::ui::tui::style::{Color, Modifier, Style};
+use crate::ui::tui::text::{Line, Span};
+use crate::ui::tui::widgets::{Block, BorderType, Borders, Padding};
 use soulseek_rs::DownloadStatus;
 
 /// One column of breathing room on each side, so content never touches the

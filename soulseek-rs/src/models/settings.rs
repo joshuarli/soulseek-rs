@@ -1,7 +1,7 @@
 //! State machine for the settings popup (account, download folder, shares).
 //! Pure — no client or terminal — so every transition is unit-testable.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use crate::ui::tui::event::{KeyCode, KeyEvent};
 
 /// What the popup is doing with the keyboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,7 +283,7 @@ impl SettingsState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::crossterm::event::KeyModifiers;
+    use crate::ui::tui::event::KeyModifiers;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

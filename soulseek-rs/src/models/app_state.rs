@@ -1,6 +1,6 @@
 use crate::models::{BrowseTabs, FileDisplayData, RoomsState, SettingsState};
 use crate::time::Timestamp;
-use ratatui::{layout::Rect, text::Line, widgets::TableState};
+use crate::ui::tui::{layout::Rect, text::Line, widgets::TableState};
 use soulseek_rs::{DownloadStatus, types::Download};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc::Receiver, mpsc::Sender};

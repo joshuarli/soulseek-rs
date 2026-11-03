@@ -1,5 +1,5 @@
 size: columns=80 rows=24
-cursor: row=17 column=66 visible=false
+cursor: hidden
 modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
 00│················································································
 01│················································································

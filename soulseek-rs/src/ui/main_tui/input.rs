@@ -6,11 +6,11 @@ use crate::ui::panes::{
     InfoSubject, name_end_offset, query_end_offset, selected_transfer,
     transfer_name_end_offset, upload_display_name,
 };
-use ratatui::crossterm::event::{
+use crate::ui::tui::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::Position;
-use ratatui::widgets::TableState;
+use crate::ui::tui::layout::Position;
+use crate::ui::tui::widgets::TableState;
 
 const NAME_SCROLL_STEP: isize = 8;
 

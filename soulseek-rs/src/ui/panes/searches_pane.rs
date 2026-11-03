@@ -4,7 +4,7 @@ use crate::ui::{
     HIGHLIGHT_SYMBOL, body_style, dimmed_style, header_style, pane_block,
     pane_title, row_highlight_style, success_style, warning_style,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::{Constraint, Rect},
     widgets::{Cell, HighlightSpacing, Row, Table, TableState},

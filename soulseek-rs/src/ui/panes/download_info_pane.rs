@@ -4,7 +4,7 @@ use crate::ui::{
     format_speed, inactive_style, info_style, pane_block, pane_title,
     primary_style, success_style, warning_style,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::Rect,
     style::Style,
@@ -168,7 +168,7 @@ fn push_file_header(
     let (basename, parent_dir) = split_filename(filename);
     lines.push(Line::from(Span::styled(
         basename,
-        style.add_modifier(ratatui::style::Modifier::BOLD),
+        style.add_modifier(crate::ui::tui::style::Modifier::BOLD),
     )));
     if !parent_dir.is_empty() {
         lines.push(Line::from(Span::styled(parent_dir, dimmed_style())));

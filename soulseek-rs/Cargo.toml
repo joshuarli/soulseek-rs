@@ -40,7 +40,7 @@ workspace = true
 soulseek-rs-lib = { version = "19.1.0", path = "../soulseek-rs-lib" }
 
 lexopt = "0.3"
-ratatui = "0.30.2"
+kasuari = "0.4.12"
 unicode-width = "0.2"
 dotenv = "0.15.0"
 deser = { version = "0.10.2", features = ["derive"] }
@@ -54,6 +54,7 @@ xmltree = "0.10"
 directories = "6"
 getrandom = "0.4.3"
 libc = "0.2.189"
+rustix = { version = "1.1", features = ["termios", "event"] }
 
 [dev-dependencies]
 laputa-ptytest = "0.3"

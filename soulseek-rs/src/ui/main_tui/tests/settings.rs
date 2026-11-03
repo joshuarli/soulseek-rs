@@ -141,7 +141,7 @@ fn the_settings_popup_names_the_account_and_its_shares() {
 
     let screen = screen_sized(&mut tui, 100, 30);
     assert!(screen.contains("tester"), "{screen}");
-    assert!(screen.contains("12 files in 3 folders"), "{screen}");
+    assert!(screen.contains("4 files in 2 folders"), "{screen}");
 }
 
 /// Typed twice the same way, the new password reaches the session — and

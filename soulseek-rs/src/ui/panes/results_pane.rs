@@ -6,7 +6,7 @@ use crate::ui::{
     header_style, info_style, page_window, pane_block, pane_title, render_page,
     row_highlight_style, success_style, warning_style,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::{Constraint, Rect},
     text::{Line, Span},
@@ -217,7 +217,7 @@ pub fn render_results_pane(
 mod tests {
     use super::{ResultsPaneParams, render_results_pane, row_is_selected};
     use crate::models::FileDisplayData;
-    use ratatui::{Terminal, backend::TestBackend, widgets::TableState};
+    use crate::ui::tui::{Terminal, backend::TestBackend, widgets::TableState};
     use std::collections::HashSet;
 
     fn render_rows(items: &[FileDisplayData], name_offset: usize) -> String {
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn the_end_offset_is_the_longer_columns() {
         // 88 cells wide: 11 for the name, 7 for the folder.
-        let area = ratatui::layout::Rect::new(0, 0, 88, 6);
+        let area = crate::ui::tui::layout::Rect::new(0, 0, 88, 6);
         let folder = "f".repeat(20);
         assert_eq!(super::name_end_offset(&format!("{folder}\\a"), area), 14);
         let name = "x".repeat(40);

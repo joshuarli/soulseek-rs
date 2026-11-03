@@ -12,7 +12,7 @@ use crate::ui::{
     pack_shortcuts, pane_block, plain_title, primary_style,
     render_download_stats, warning_style,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Position, Rect},
     style::Modifier,
@@ -256,7 +256,7 @@ impl MainTui {
         if self.state.show_browse && !self.state.browse.is_empty() {
             let area = centered_rect(80, 80, frame.area());
             self.state.popup_area = Some(area);
-            frame.render_widget(ratatui::widgets::Clear, area);
+            frame.render_widget(crate::ui::tui::widgets::Clear, area);
             render_browse_pane(
                 frame,
                 area,
@@ -276,7 +276,7 @@ impl MainTui {
         if self.state.show_rooms {
             let area = centered_rect(85, 80, frame.area());
             self.state.popup_area = Some(area);
-            frame.render_widget(ratatui::widgets::Clear, area);
+            frame.render_widget(crate::ui::tui::widgets::Clear, area);
             render_rooms_pane(
                 frame,
                 area,
@@ -298,7 +298,7 @@ impl MainTui {
             return;
         };
         let area = centered_rect(70, 60, frame.area());
-        frame.render_widget(ratatui::widgets::Clear, area);
+        frame.render_widget(crate::ui::tui::widgets::Clear, area);
 
         let selected = settings.selected_row();
         let mut lines: Vec<Line> = Vec::new();
@@ -415,9 +415,9 @@ impl MainTui {
 
         let block = pane_block(true).title(plain_title("Settings", true));
         frame.render_widget(
-            ratatui::widgets::Paragraph::new(lines)
+            crate::ui::tui::widgets::Paragraph::new(lines)
                 .block(block)
-                .wrap(ratatui::widgets::Wrap { trim: false }),
+                .wrap(crate::ui::tui::widgets::Wrap { trim: false }),
             area,
         );
     }
@@ -426,7 +426,7 @@ impl MainTui {
         // The per-conversation chat box supersedes the old flat message list;
         // it renders the messages and the compose line itself.
         let area = centered_rect(70, 60, frame.area());
-        frame.render_widget(ratatui::widgets::Clear, area);
+        frame.render_widget(crate::ui::tui::widgets::Clear, area);
         self.state.popup_area = Some(area);
         let own = self.client.username();
         render_chat_pane(frame, area, &mut self.state, &own);

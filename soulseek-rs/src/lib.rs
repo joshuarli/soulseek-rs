@@ -28,3 +28,13 @@ pub use ui::MainTui;
 #[cfg(feature = "fixtures")]
 #[doc(hidden)]
 pub use ui::fixture::FixtureSession;
+
+/// The renderer and event types, for integration tests that drive the window
+/// against a test backend.
+#[doc(hidden)]
+pub use ui::tui::{Terminal, backend::TestBackend};
+#[doc(hidden)]
+pub use ui::tui::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};

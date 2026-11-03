@@ -1,5 +1,5 @@
 size: columns=200 rows=60
-cursor: row=54 column=142 visible=false
+cursor: hidden
 modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
 00│╭·Status···daemon·127.0.0.1:5030·──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 01││·soulseek-rs·🦀›·v19.1.0··Downloads:·1·active,·1·completed,·1·failed,·1·queued,·1·paused·····················25.7/40.1·MB···3.24·MB/s···[████████████████████████████████████░░░░░░░░░░░░░░░░░░░░]·64%·│

@@ -74,8 +74,8 @@ fn type_text(terminal: &mut PtyTest, text: &str) {
     terminal.send_text(deadline, text).expect("send text");
 }
 
-fn freeze(terminal: &mut PtyTest, name: &str) {
-    let actual = normalize_clock(
+fn freeze(terminal: &PtyTest, name: &str) {
+    let actual = normalize_snapshot(
         &terminal
             .screen()
             .to_text(SnapshotOptions::default().with_attributes()),
@@ -91,8 +91,36 @@ fn freeze(terminal: &mut PtyTest, name: &str) {
     assert_eq!(expected, actual, "snapshot {name} differs");
 }
 
-/// Room messages are stamped with the wall clock when the fixture delivers
-/// them, so the hour and minute are the only part of a frame that moves.
+/// The hidden cursor is not visible, and the position left behind by a
+/// different diff strategy cannot be seen. Room messages also carry the wall
+/// clock when the fixture delivers them, and a spinner frame depends on when
+/// the capture lands.
+fn normalize_snapshot(snapshot: &str) -> String {
+    let mut normalized = String::with_capacity(snapshot.len());
+    for line in snapshot.lines() {
+        if line.starts_with("cursor:") && line.contains("visible=false") {
+            normalized.push_str("cursor: hidden\n");
+        } else {
+            normalized.push_str(&normalize_spinner(&normalize_clock(line)));
+            normalized.push('\n');
+        }
+    }
+    normalized
+}
+
+fn normalize_spinner(snapshot: &str) -> String {
+    snapshot
+        .chars()
+        .map(|character| {
+            if "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(character) {
+                '⠋'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn normalize_clock(snapshot: &str) -> String {
     let chars: Vec<char> = snapshot.chars().collect();
     let mut output = String::with_capacity(snapshot.len());
@@ -144,7 +172,7 @@ fn login_screen_matches_the_recorded_frame() {
     let mut terminal = PtyTest::spawn(scenario).expect("spawn program");
 
     wait_for(&mut terminal, "Username:");
-    freeze(&mut terminal, "login-80x24");
+    freeze(&terminal, "login-80x24");
 
     press(&mut terminal, Key::Escape);
     let deadline = terminal.deadline(STEP);
@@ -165,33 +193,33 @@ fn populated_window_matches_the_recorded_frames() {
 
     wait_for(&mut terminal, "aphex twi");
     wait_for(&mut terminal, "Downloads/Uploads");
-    freeze(&mut terminal, "main-120x40");
+    freeze(&terminal, "main-120x40");
 
     // The restored, completed search brings its results into the pane.
     press(&mut terminal, Key::Down);
     press(&mut terminal, Key::Enter);
     wait_for(&mut terminal, "Pulsewidth");
-    freeze(&mut terminal, "results-120x40");
+    freeze(&terminal, "results-120x40");
 
     type_text(&mut terminal, "?");
     wait_for(&mut terminal, "Keys");
-    freeze(&mut terminal, "help-120x40");
+    freeze(&terminal, "help-120x40");
     type_text(&mut terminal, "?");
     wait_until_absent(&mut terminal, "Keys");
 
     type_text(&mut terminal, "i");
     wait_for(&mut terminal, "idm_peer");
     wait_for(&mut terminal, "do you have the remastered Tha too?");
-    freeze(&mut terminal, "chat-120x40");
+    freeze(&terminal, "chat-120x40");
     press(&mut terminal, Key::Escape);
     wait_until_absent(&mut terminal, "Chats (");
 
     type_text(&mut terminal, "c");
     wait_for(&mut terminal, "The Ambient Room");
-    freeze(&mut terminal, "rooms-list-120x40");
+    freeze(&terminal, "rooms-list-120x40");
     press(&mut terminal, Key::Enter);
     wait_for(&mut terminal, "anyone else on the new Autechre?");
-    freeze(&mut terminal, "rooms-chat-120x40");
+    freeze(&terminal, "rooms-chat-120x40");
     press(&mut terminal, Key::Escape);
     wait_until_absent(&mut terminal, "anyone else on the new Autechre?");
     press(&mut terminal, Key::Escape);
@@ -199,7 +227,7 @@ fn populated_window_matches_the_recorded_frames() {
 
     type_text(&mut terminal, "o");
     wait_for(&mut terminal, "Signed in as");
-    freeze(&mut terminal, "settings-120x40");
+    freeze(&terminal, "settings-120x40");
     press(&mut terminal, Key::Escape);
     wait_until_absent(&mut terminal, "Signed in as");
 
@@ -207,14 +235,14 @@ fn populated_window_matches_the_recorded_frames() {
     type_text(&mut terminal, "idm_peer");
     press(&mut terminal, Key::Enter);
     wait_for(&mut terminal, "Browse idm_peer");
-    freeze(&mut terminal, "browse-120x40");
+    freeze(&terminal, "browse-120x40");
     press(&mut terminal, Key::Escape);
     wait_until_absent(&mut terminal, "Browse idm_peer");
 
     type_text(&mut terminal, "s");
     type_text(&mut terminal, "boards of canada");
     wait_for(&mut terminal, "boards of canada");
-    freeze(&mut terminal, "command-bar-120x40");
+    freeze(&terminal, "command-bar-120x40");
     press(&mut terminal, Key::Escape);
     wait_until_absent(&mut terminal, "boards of canada");
 
@@ -226,12 +254,12 @@ fn narrow_window_still_fits() {
     let (mut terminal, baseline) = start("tui-narrow", 40, 24);
 
     wait_for(&mut terminal, "Downloads/Up");
-    freeze(&mut terminal, "main-40x24");
+    freeze(&terminal, "main-40x24");
 
     press(&mut terminal, Key::Down);
     press(&mut terminal, Key::Enter);
     wait_for(&mut terminal, "Results: aphex");
-    freeze(&mut terminal, "results-40x24");
+    freeze(&terminal, "results-40x24");
 
     quit(&mut terminal, &baseline);
 }
@@ -241,7 +269,7 @@ fn tiny_window_renders_without_content_rows() {
     let (mut terminal, baseline) = start("tui-tiny", 40, 12);
 
     wait_for(&mut terminal, "Status");
-    freeze(&mut terminal, "main-40x12");
+    freeze(&terminal, "main-40x12");
 
     quit(&mut terminal, &baseline);
 }
@@ -251,11 +279,11 @@ fn wide_window_keeps_the_columns() {
     let (mut terminal, baseline) = start("tui-wide", 200, 60);
 
     wait_for(&mut terminal, "aphex twi");
-    freeze(&mut terminal, "main-200x60");
+    freeze(&terminal, "main-200x60");
     press(&mut terminal, Key::Down);
     press(&mut terminal, Key::Enter);
     wait_for(&mut terminal, "Pulsewidth");
-    freeze(&mut terminal, "results-200x60");
+    freeze(&terminal, "results-200x60");
 
     quit(&mut terminal, &baseline);
 }

@@ -5,7 +5,7 @@ use crate::ui::{
     page_window, pane_block, primary_style, render_page, row_highlight_style,
     warning_style,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::Modifier,
@@ -310,7 +310,7 @@ mod tests {
     use super::render_browse_pane;
     use crate::models::{BrowseState, BrowseTabs, DownloadEntry};
     use crate::ui::{GLYPH_ACTIVE, GLYPH_DONE};
-    use ratatui::{Terminal, backend::TestBackend, widgets::TableState};
+    use crate::ui::tui::{Terminal, backend::TestBackend, widgets::TableState};
     use soulseek_rs::types::{Download, DownloadMetadata, DownloadStatus};
     use soulseek_rs::{SharedDirectory, SharedFileEntry};
     use std::sync::mpsc;

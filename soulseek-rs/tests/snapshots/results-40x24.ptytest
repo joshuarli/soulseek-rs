@@ -1,5 +1,5 @@
 size: columns=40 rows=24
-cursor: row=22 column=38 visible=false
+cursor: hidden
 modes: alternate-screen=true application-cursor=false application-keypad=false bracketed-paste=false
 00│╭·Status···daemon·127.0.0.1:5030·──────╮
 01││·soulseek-rs·🦀›·v1925.7/40.1·MB···3.2·│

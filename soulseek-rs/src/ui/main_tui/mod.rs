@@ -13,9 +13,9 @@ use crate::persist::{
     state::{PersistedMessage, StateStore},
 };
 use crate::error::Result;
-use ratatui::{
+use crate::ui::tui::{
     DefaultTerminal,
-    crossterm::event::{self, Event, KeyEventKind, poll},
+    event::{self, Event, KeyEventKind, poll},
 };
 use std::{sync::Arc, time::Duration};
 
@@ -186,17 +186,10 @@ impl MainTui {
     }
 
     pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<TuiExit> {
-        use ratatui::crossterm::{event::DisableMouseCapture, execute};
-
-        // Run the event loop, then restore the terminal unconditionally: if the
-        // loop returns early with an error the terminal must still be taken out
-        // of raw mode / the alternate screen and mouse capture disabled, or the
-        // user is left with a corrupted terminal.
         let result = self.run_event_loop(&mut terminal);
         self.save_persisted_state();
 
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        ratatui::restore();
+        let _ = terminal.restore();
         soulseek_rs::utils::logger::disable_buffering();
 
         result.map(|()| self.state.exit.unwrap_or(TuiExit::Quit))
@@ -240,7 +233,7 @@ impl MainTui {
                         Event::Mouse(mouse) => {
                             self.handle_mouse_event(mouse);
                         }
-                        _ => {}
+                        Event::Key(_) => {}
                     }
                     if self.state.exit.is_some() || !poll(Duration::ZERO)? {
                         break;

@@ -15,9 +15,7 @@
 mod common;
 
 use common::{Soulfind, settle};
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use soulseek_rs_tui::{KeyCode, KeyEvent, KeyModifiers, Terminal, TestBackend};
 use soulseek_rs::Client;
 use soulseek_rs_tui::MainTui;
 use soulseek_rs_tui::models::SearchStatus;

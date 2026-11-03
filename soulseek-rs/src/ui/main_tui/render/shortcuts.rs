@@ -198,7 +198,7 @@ impl MainTui {
             width,
             height,
         );
-        frame.render_widget(ratatui::widgets::Clear, area);
+        frame.render_widget(crate::ui::tui::widgets::Clear, area);
 
         let block = pane_block(true).title(plain_title("Keys", true));
         let inner = block.inner(area);

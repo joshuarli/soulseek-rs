@@ -5,7 +5,7 @@ use crate::ui::{
     format_bytes_progress, format_progress_bar, info_style, pane_block,
     plain_title, primary_style, success_style, warning_style,
 };
-use ratatui::{
+use crate::ui::tui::{
     Frame,
     layout::{Alignment, Constraint, Layout},
     style::{Modifier, Style},
@@ -50,7 +50,7 @@ fn active_progress(downloads: &[DownloadEntry]) -> Option<(u64, u64, f64)> {
 /// them running.
 pub fn render_download_stats(
     frame: &mut Frame,
-    area: ratatui::layout::Rect,
+    area: crate::ui::tui::layout::Rect,
     downloads: &[DownloadEntry],
     active_count: usize,
     daemon: Option<&str>,

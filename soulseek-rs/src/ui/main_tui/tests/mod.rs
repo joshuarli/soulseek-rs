@@ -19,7 +19,7 @@ use crate::daemon::proto::ChatMessageDto;
 
 use crate::models::{FocusedPane, MessageDirection, RoomsView, SearchStatus};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::ui::tui::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::ui::fixture::{
     TalkativeSession, at_status, completed, queued, uploading,
@@ -119,7 +119,7 @@ fn results_tui(n: usize) -> MainTui {
     tui.state.focused_pane = FocusedPane::Results;
     // 88 cells wide gives the name column 11 cells and the folder 7.
     tui.state.results_pane_area =
-        Some(ratatui::layout::Rect::new(0, 0, 88, 13));
+        Some(crate::ui::tui::layout::Rect::new(0, 0, 88, 13));
     tui
 }
 
@@ -139,8 +139,8 @@ fn selected(tui: &MainTui) -> Option<usize> {
 }
 
 fn screen_sized(tui: &mut MainTui, width: u16, height: u16) -> String {
-    let backend = ratatui::backend::TestBackend::new(width, height);
-    let mut terminal = ratatui::Terminal::new(backend).expect("backend");
+    let backend = crate::ui::tui::backend::TestBackend::new(width, height);
+    let mut terminal = crate::ui::tui::Terminal::new(backend).expect("backend");
     terminal.draw(|frame| tui.render(frame)).expect("draw");
     terminal.backend().to_string()
 }
@@ -151,11 +151,11 @@ fn screen_of(tui: &mut MainTui) -> String {
 
 fn mouse(
     tui: &mut MainTui,
-    kind: ratatui::crossterm::event::MouseEventKind,
+    kind: crate::ui::tui::event::MouseEventKind,
     column: u16,
     row: u16,
 ) {
-    tui.handle_mouse_event(ratatui::crossterm::event::MouseEvent {
+    tui.handle_mouse_event(crate::ui::tui::event::MouseEvent {
         kind,
         column,
         row,
@@ -164,7 +164,7 @@ fn mouse(
 }
 
 fn mouse_drag_row(tui: &mut MainTui, from: (u16, u16), to: (u16, u16)) {
-    use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+    use crate::ui::tui::event::{MouseButton, MouseEventKind};
     mouse(tui, MouseEventKind::Down(MouseButton::Left), from.0, from.1);
     mouse(tui, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
     mouse(tui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
