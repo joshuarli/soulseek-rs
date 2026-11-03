@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 
 use log::debug;
 
-use crate::common::options::{DEFAULT_TIMEOUT, RESPONSE_TIMEOUT};
-use crate::common::{messages, parsing, SearchOptions};
-use crate::http;
-use crate::errors::SearchError;
-use crate::gateway::Gateway;
+use super::common::options::{DEFAULT_TIMEOUT, RESPONSE_TIMEOUT};
+use super::common::{messages, parsing, SearchOptions};
+use super::http;
+use super::errors::SearchError;
+use super::gateway::Gateway;
 
 /// Search gateway, using the given `SearchOptions`.
 ///
@@ -17,7 +17,7 @@ use crate::gateway::Gateway;
 /// It can be created with `Default::default()` or `SearchOptions::default()`.
 ///
 /// # Example
-/// ```no_run
+/// ```ignore
 /// use igd_next::{search_gateway, SearchOptions, Result};
 ///
 /// fn main() -> Result {

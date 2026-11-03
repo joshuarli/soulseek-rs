@@ -1,4 +1,4 @@
-use crate::PortMappingProtocol;
+use super::super::PortMappingProtocol;
 use std::net::SocketAddr;
 
 // Content of the request.

@@ -14,7 +14,7 @@ pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// # Example
 /// To customize only a few options you can use `Default::default()` or `SearchOptions::default()` and the
 /// [struct update syntax](https://doc.rust-lang.org/book/ch05-01-defining-structs.html#creating-instances-from-other-instances-with-struct-update-syntax).
-/// ```
+/// ```ignore
 /// # use std::time::Duration;
 /// # use igd_next::SearchOptions;
 /// let opts = SearchOptions {

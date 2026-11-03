@@ -32,11 +32,15 @@ lexopt = "0.3"
 ratatui = "0.30.2"
 unicode-width = "0.2"
 dotenv = "0.15.0"
-igd-next = { version = "0.17.1", path = "../vendor/igd-next" }
 deser = { version = "0.10.2", features = ["derive"] }
 deser-json = "0.10.2"
 deser-toml = "0.10.2"
 deser-value = "0.10.2"
+h12tiny = { version = "0.7.0", default-features = false, features = ["client-sync"] }
+log = "0.4"
+rand = "0.10"
+url = "2"
+xmltree = "0.10"
 directories = "6"
 # Linux uses the pure-Rust zbus Secret Service backend (async-secret-service
 # + async-io + crypto-rust) instead of sync-secret-service, which links the

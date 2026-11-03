@@ -1,6 +1,5 @@
 [workspace]
 members = ["soulseek-rs-lib", "soulseek-rs"]
-exclude = ["vendor/igd-next"]
 resolver = "2"
 
 [workspace.package]

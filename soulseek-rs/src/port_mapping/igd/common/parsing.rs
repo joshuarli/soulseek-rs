@@ -5,11 +5,11 @@ use std::net::{IpAddr, SocketAddr};
 use url::Url;
 use xmltree::{self, Element};
 
-use crate::errors::{
+use super::super::errors::{
     AddAnyPortError, AddPortError, GetExternalIpError, GetGenericPortMappingEntryError, RemovePortError, RequestError,
     SearchError,
 };
-use crate::PortMappingProtocol;
+use super::super::PortMappingProtocol;
 
 // Parse the result.
 pub fn parse_search_result(text: &str) -> Result<(SocketAddr, String), SearchError> {

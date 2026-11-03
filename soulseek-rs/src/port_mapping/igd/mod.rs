@@ -1,24 +1,17 @@
+#![allow(dead_code)]
+#![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(missing_docs)]
 
 //! This library allows you to communicate with an IGD enabled device.
 //! Use one of the `search_gateway` functions to obtain a `Gateway` object.
 //! You can then communicate with the device via this object.
 
-// data structures
-pub use self::common::parsing::PortMappingEntry;
 pub use self::common::SearchOptions;
-pub use self::errors::{
-    AddAnyPortError, AddPortError, GetExternalIpError, GetGenericPortMappingEntryError, RemovePortError, RequestError,
-    SearchError,
-};
-pub use self::errors::{Error, Result};
 pub use self::gateway::Gateway;
 
 // search of gateway
 pub use self::search::search_gateway;
 
-#[cfg(feature = "aio_tokio")]
-pub mod aio;
 mod common;
 mod errors;
 mod gateway;

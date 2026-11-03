@@ -8,6 +8,7 @@
 //! port-forward manually). The mapping is renewed on a timer and removed on
 //! shutdown.
 
+mod igd;
 mod nat_pmp;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -17,7 +18,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use igd_next::{PortMappingProtocol, SearchOptions, search_gateway};
+use igd::{PortMappingProtocol, SearchOptions, search_gateway};
 use soulseek_rs::utils::logger::{self, LogLevel};
 
 const MAPPING_DESCRIPTION: &str = "soulseek-rs";
@@ -131,7 +132,7 @@ pub fn probe(port: u16) -> Probe {
 /// remove it.
 enum Backend {
     Upnp {
-        gateway: Box<igd_next::Gateway>,
+        gateway: Box<igd::Gateway>,
         local_addr: SocketAddr,
         external_port: u16,
         /// The lease that the router accepted (0 == permanent).
@@ -204,7 +205,7 @@ fn map_upnp(local_ip: IpAddr, port: u16) -> Option<(Backend, u32)> {
 /// Map `port` on an already-discovered IGD `gateway`. Split out from discovery
 /// so it can be exercised against a mock IGD in tests.
 fn map_via_gateway(
-    gateway: igd_next::Gateway,
+    gateway: igd::Gateway,
     local_addr: SocketAddr,
     port: u16,
 ) -> Option<(Backend, u32)> {
@@ -572,7 +573,7 @@ mod tests {
     #[test]
     fn upnp_maps_a_port_against_a_mock_igd() {
         let (igd_addr, requests) = mock_igd();
-        let gateway = igd_next::Gateway {
+        let gateway = igd::Gateway {
             addr: igd_addr,
             root_url: format!("http://{igd_addr}/rootDesc.xml"),
             control_url: "/ctl".to_string(),
