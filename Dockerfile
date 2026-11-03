@@ -78,13 +78,15 @@ RUN channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' /tmp/rust-toolchain.toml)" 
     && rustup default "$channel" \
     && rm /tmp/rust-toolchain.toml
 
-# Host proc-macro links search rustc's target library directory for CRT
-# startup objects. Keep those objects available there without changing the
-# target's build-std Rust flags.
+# Host proc-macro links run clang without the target-scoped -B flag, so only
+# the driver's default paths are searched. Expose the host triple's stub
+# objects in /usr/lib (a default path) and in rustc's target library
+# directory, without changing the target's build-std Rust flags.
 RUN host_target="$(rustc -vV | awk '/^host:/ {print $2}')" \
     && host_libdir="$(rustc --print target-libdir)" \
     && for obj in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o; do \
         ln -sf "/usr/lib/e-crt/$host_target/$obj" "$host_libdir/$obj"; \
+        ln -sf "/usr/lib/e-crt/$host_target/$obj" "/usr/lib/$obj"; \
     done
 
 # Alpine keeps these libraries outside the Rust musl target directory.
