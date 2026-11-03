@@ -1,4 +1,3 @@
 # Generated and compared byte-for-byte by `daemon::openrpc::document_is_current`,
-# which builds its expectation with `\n`. A CRLF checkout would fail that test on
-# Windows.
+# which builds its expectation with `\n`, so the checkout must stay LF.
 soulseek-rs/docs/openrpc.json text eol=lf

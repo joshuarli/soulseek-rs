@@ -24,7 +24,6 @@ const COMFORTABLE_OPEN_FILES: u64 = 1024;
 /// Say up front when the process cannot hold a busy session's sockets, so an
 /// operator reads a warning with a number in it instead of an EMFILE storm an
 /// hour later. The embedding process owns its rlimits; the library only looks.
-#[cfg(unix)]
 fn warn_if_open_file_limit_is_low() {
     // SAFETY: getrlimit only fills the struct it is handed.
     let limit = unsafe {
@@ -42,9 +41,6 @@ fn warn_if_open_file_limit_is_low() {
         );
     }
 }
-
-#[cfg(not(unix))]
-fn warn_if_open_file_limit_is_low() {}
 
 impl Client {
     pub fn connect(&mut self) -> Result<()> {

@@ -675,7 +675,6 @@ mod tests {
         assert!(fish.contains("-l download-dir"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_non_utf8_positional_is_rejected() {
         use std::ffi::OsString;

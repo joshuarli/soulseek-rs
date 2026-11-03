@@ -15,8 +15,8 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, username: &str) -> Result<()>;
 }
 
-/// OS keychain (macOS Keychain / Windows Credential Manager / Linux Secret
-/// Service) under service name `soulseek-rs`, account = Soulseek username.
+/// OS keychain (macOS Keychain / Linux Secret Service) under service name
+/// `soulseek-rs`, account = Soulseek username.
 pub struct KeyringStore;
 
 const SERVICE: &str = "soulseek-rs";
@@ -103,12 +103,8 @@ pub fn resolve_password(
 
 /// Run `password_cmd` through the platform shell and return trimmed stdout.
 fn run_password_cmd(cmd: &str) -> Option<String> {
-    let output = if cfg!(windows) {
-        std::process::Command::new("cmd").args(["/C", cmd]).output()
-    } else {
-        std::process::Command::new("sh").args(["-c", cmd]).output()
-    }
-    .ok()?;
+    let output =
+        std::process::Command::new("sh").args(["-c", cmd]).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -181,7 +177,6 @@ mod tests {
         assert_eq!(got.as_deref(), Some("from-keyring"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn password_cmd_used_when_keyring_has_nothing() {
         let store = FakeStore::default();
@@ -194,7 +189,6 @@ mod tests {
         assert_eq!(got.as_deref(), Some("from-cmd"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn keyring_failure_falls_through_to_password_cmd() {
         let store = FakeStore {
@@ -235,7 +229,6 @@ mod tests {
         assert_eq!(resolve_password(None, None, None, &store), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn failing_password_cmd_yields_none() {
         let store = FakeStore::default();

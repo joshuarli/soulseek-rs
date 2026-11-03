@@ -126,7 +126,6 @@ impl Pending {
 /// disconnect.
 enum Closer {
     Tcp(TcpStream),
-    #[cfg(unix)]
     Unix(std::os::unix::net::UnixStream),
 }
 
@@ -134,7 +133,6 @@ impl Closer {
     fn close(&self) {
         let _ = match self {
             Self::Tcp(stream) => stream.shutdown(std::net::Shutdown::Both),
-            #[cfg(unix)]
             Self::Unix(stream) => stream.shutdown(std::net::Shutdown::Both),
         };
     }
@@ -396,7 +394,6 @@ fn open(endpoint: &Endpoint) -> Result<Halves> {
     }
 }
 
-#[cfg(unix)]
 fn connect_socket(path: &Path) -> Result<Halves> {
     let stream =
         std::os::unix::net::UnixStream::connect(path).map_err(|e| {
@@ -409,15 +406,6 @@ fn connect_socket(path: &Path) -> Result<Halves> {
     let closer =
         Closer::Unix(stream.try_clone().map_err(SoulseekRs::NetworkError)?);
     Ok((Box::new(read), Box::new(stream), closer))
-}
-
-#[cfg(not(unix))]
-fn connect_socket(path: &Path) -> Result<Halves> {
-    Err(network(format!(
-        "this platform has no Unix sockets, so {} cannot be a daemon address; \
-         use host:port",
-        path.display()
-    )))
 }
 
 impl Drop for RemoteSession {

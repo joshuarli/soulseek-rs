@@ -58,8 +58,8 @@ fn project_dirs() -> Option<ProjectDirs> {
 }
 
 /// Default download (and shared) folder: a `Soulseek` subfolder of the
-/// platform Downloads directory (XDG on Linux, known-folder on Windows),
-/// so Soulseek files don't clutter the Downloads root.
+/// platform Downloads directory (XDG on Linux), so Soulseek files don't
+/// clutter the Downloads root.
 #[must_use]
 pub fn default_download_dir() -> String {
     let user_dirs = directories::UserDirs::new();

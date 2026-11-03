@@ -123,7 +123,6 @@ impl Daemon {
             })
     }
 
-    #[cfg(unix)]
     fn connect_socket(&self) -> Option<Connection> {
         let stream =
             std::os::unix::net::UnixStream::connect(self.socket_path()).ok()?;
@@ -249,7 +248,6 @@ fn tcp_needs_the_token_and_the_socket_does_not() {
         "the right token must be accepted: {accepted}"
     );
 
-    #[cfg(unix)]
     {
         // The socket's permissions have already answered the question.
         let mut local = daemon.connect_socket().expect("connect");
@@ -758,7 +756,6 @@ fn a_client_that_attaches_later_sees_what_is_already_there() {
 /// land — and `daemon.status` has to report the move, because that status is
 /// what every attached client trusts for "where did my file go".
 #[test]
-#[cfg(unix)]
 fn the_download_folder_moves_when_asked_and_status_says_so() {
     let daemon = daemon_or_skip!();
     let mut connection = daemon.connect_socket().expect("socket");
@@ -804,7 +801,6 @@ fn the_download_folder_moves_when_asked_and_status_says_so() {
 /// time it recorded; a wishlist search that never records one renders as
 /// completed everywhere the moment it goes out.
 #[test]
-#[cfg(unix)]
 fn a_wishlist_search_is_reported_as_just_started() {
     let daemon = daemon_or_skip!();
     let mut connection = daemon.connect_socket().expect("socket");

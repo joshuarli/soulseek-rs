@@ -52,13 +52,11 @@ const MAX_CONNECTIONS: usize = 64;
 /// authentication, the same bargain Docker and ssh-agent make. TCP is opt-in
 /// and always needs the token.
 pub enum Listener {
-    #[cfg(unix)]
     Unix(std::os::unix::net::UnixListener),
     Tcp(TcpListener),
 }
 
 pub enum Stream {
-    #[cfg(unix)]
     Unix(std::os::unix::net::UnixStream),
     Tcp(TcpStream),
 }
@@ -66,7 +64,6 @@ pub enum Stream {
 impl Stream {
     fn try_clone(&self) -> std::io::Result<Self> {
         match self {
-            #[cfg(unix)]
             Self::Unix(stream) => stream.try_clone().map(Self::Unix),
             Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
         }
@@ -74,7 +71,6 @@ impl Stream {
 
     fn set_read_timeout(&self, timeout: Option<Duration>) {
         let _ = match self {
-            #[cfg(unix)]
             Self::Unix(stream) => stream.set_read_timeout(timeout),
             Self::Tcp(stream) => stream.set_read_timeout(timeout),
         };
@@ -85,7 +81,6 @@ impl Stream {
     /// hub can only reach a stalled client by closing its socket.
     pub(super) fn shutdown(&self) {
         let _ = match self {
-            #[cfg(unix)]
             Self::Unix(stream) => stream.shutdown(std::net::Shutdown::Both),
             Self::Tcp(stream) => stream.shutdown(std::net::Shutdown::Both),
         };
@@ -94,7 +89,6 @@ impl Stream {
     /// Whether the transport itself proves who is calling.
     const fn trusted_by_transport(&self) -> bool {
         match self {
-            #[cfg(unix)]
             Self::Unix(_) => true,
             Self::Tcp(_) => false,
         }
@@ -104,7 +98,6 @@ impl Stream {
 impl std::io::Read for Stream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            #[cfg(unix)]
             Self::Unix(stream) => stream.read(buffer),
             Self::Tcp(stream) => stream.read(buffer),
         }
@@ -114,7 +107,6 @@ impl std::io::Read for Stream {
 impl Write for Stream {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         match self {
-            #[cfg(unix)]
             Self::Unix(stream) => stream.write(buffer),
             Self::Tcp(stream) => stream.write(buffer),
         }
@@ -122,7 +114,6 @@ impl Write for Stream {
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            #[cfg(unix)]
             Self::Unix(stream) => stream.flush(),
             Self::Tcp(stream) => stream.flush(),
         }
@@ -147,7 +138,6 @@ impl Listener {
 
     fn accept(&self) -> std::io::Result<Stream> {
         match self {
-            #[cfg(unix)]
             Self::Unix(listener) => {
                 listener.accept().map(|(stream, _)| Stream::Unix(stream))
             }
@@ -432,7 +422,6 @@ pub fn bind_tcp(address: &str) -> std::io::Result<Listener> {
 /// `set_permissions` the real path would be connectable by anyone on the
 /// machine, and on this transport connecting *is* authenticating. The rename
 /// is atomic, so the published path never exists with the wrong mode.
-#[cfg(unix)]
 pub fn bind_unix(path: &std::path::Path) -> std::io::Result<Listener> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -455,7 +444,6 @@ pub fn bind_unix(path: &std::path::Path) -> std::io::Result<Listener> {
 
 /// Remove a socket file left by a dead daemon — but never one a live daemon is
 /// still serving, which would silently steal its clients.
-#[cfg(unix)]
 fn remove_stale_socket(path: &std::path::Path) -> std::io::Result<()> {
     match std::os::unix::net::UnixStream::connect(path) {
         Ok(_) => Err(std::io::Error::new(

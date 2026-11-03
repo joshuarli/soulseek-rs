@@ -25,8 +25,6 @@ Releases are automated by [release-plz](https://release-plz.dev). You do not run
      | `soulseek-rs-vX.Y.Z-aarch64-unknown-linux-musl.tar.gz` | static, any glibc        |
      | `soulseek-rs-vX.Y.Z-x86_64-apple-darwin.tar.gz`        | Intel Mac                |
      | `soulseek-rs-vX.Y.Z-aarch64-apple-darwin.tar.gz`       | Apple Silicon            |
-     | `soulseek-rs-vX.Y.Z-x86_64-pc-windows-msvc.zip`        |                          |
-     | `soulseek-rs-vX.Y.Z-aarch64-pc-windows-msvc.zip`       |                          |
 
    - packages the two Linux binaries as `soulseek-rs-amd64.deb`, `soulseek-rs-arm64.deb`,
      `soulseek-rs-x86_64.rpm` and `soulseek-rs-aarch64.rpm`, with the man page and the

@@ -707,7 +707,6 @@ const WANTED_OPEN_FILES: u64 = 8192;
 /// inherits is sized for a shell. The hard limit is the ceiling, and asking
 /// past it fails outright rather than clamping, so this asks for the smaller
 /// of what we want and what we are allowed.
-#[cfg(unix)]
 fn raise_open_file_limit() -> std::io::Result<u64> {
     // SAFETY: every call takes a pointer to a `rlimit` this function owns, and
     // none of them retains it.
@@ -746,9 +745,4 @@ fn raise_open_file_limit() -> std::io::Result<u64> {
         }
         Ok(previous)
     }
-}
-
-#[cfg(not(unix))]
-const fn raise_open_file_limit() -> std::io::Result<u64> {
-    Ok(WANTED_OPEN_FILES)
 }

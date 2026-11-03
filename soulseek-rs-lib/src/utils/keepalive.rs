@@ -9,7 +9,6 @@
 use std::io;
 use std::net::TcpStream;
 
-#[cfg(unix)]
 pub fn set_keepalive(stream: &TcpStream) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
     let fd = stream.as_raw_fd();
@@ -39,7 +38,6 @@ const IDLE_SECONDS_OPTION: libc::c_int = libc::TCP_KEEPALIVE;
 ))]
 const IDLE_SECONDS_OPTION: libc::c_int = libc::TCP_KEEPIDLE;
 
-#[cfg(unix)]
 fn set_option(
     fd: libc::c_int,
     level: libc::c_int,
@@ -63,14 +61,7 @@ fn set_option(
     }
 }
 
-// ponytail: Windows wants WSAIoctl(SIO_KEEPALIVE_VALS); wire it when the
-// daemon ships there.
-#[cfg(not(unix))]
-pub fn set_keepalive(_stream: &TcpStream) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub fn keepalive_enabled(stream: &TcpStream) -> bool {
     use std::os::unix::io::AsRawFd;
     let mut value: libc::c_int = 0;
@@ -88,7 +79,7 @@ pub fn keepalive_enabled(stream: &TcpStream) -> bool {
     rc == 0 && value != 0
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[test]
 fn keepalive_is_off_until_asked_for() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

@@ -104,8 +104,7 @@ curl -fsSL https://raw.githubusercontent.com/michel/soulseek-rs/develop/website/
 Nightly is a mutable prerelease rebuilt every day and whenever the **Nightly**
 workflow is run by hand. It bypasses Homebrew, and may be less stable than a
 numbered release. A failed download, checksum, or startup check leaves an
-existing binary untouched. Windows archives for both channels are on the
-[releases page](https://github.com/michel/soulseek-rs/releases).
+existing binary untouched.
 
 Or install it with a package manager. Stable follows the latest release:
 
@@ -117,9 +116,6 @@ sudo apt install ./soulseek-rs-amd64.deb
 # Fedora, RHEL (on ARM: aarch64 for x86_64)
 sudo dnf install https://github.com/michel/soulseek-rs/releases/latest/download/soulseek-rs-x86_64.rpm
 
-# Nix
-nix run github:michel/soulseek-rs/master
-
 # Homebrew, on macOS and Linux
 brew install michel/tap/soulseek-rs
 
@@ -130,7 +126,7 @@ cargo binstall soulseek-rs
 cargo install --locked soulseek-rs
 ```
 
-Nightly is the tip of `develop`. The `.deb` and `.rpm` are downloads; Nix,
+Nightly is the tip of `develop`. The `.deb` and `.rpm` are downloads;
 Homebrew and cargo build it from source:
 
 ```bash
@@ -138,8 +134,6 @@ curl -fsSLO https://github.com/michel/soulseek-rs/releases/download/nightly/soul
 sudo apt install ./soulseek-rs-nightly-amd64.deb
 
 sudo dnf install https://github.com/michel/soulseek-rs/releases/download/nightly/soulseek-rs-nightly-x86_64.rpm
-
-nix run github:michel/soulseek-rs/develop
 
 brew install --HEAD michel/tap/soulseek-rs
 
@@ -150,9 +144,9 @@ A `.deb` or `.rpm` does not update itself. Install the newer file over it. A
 nightly sorts above the release it follows, so going back to stable is a
 downgrade. In a script apt refuses one without `--allow-downgrades`, while dnf
 goes ahead. Both carry the man page and completions for bash, zsh and fish.
-A release download prints `19.0.0 (git abc123456789)`. Any Nix build, and a
-nightly download, reads `19.0.0+git202609141144.deb846b (git abc123456789)`:
-the last release, the commit's time in UTC, and the commit. A Homebrew `--HEAD`
+A release download prints `19.0.0 (git abc123456789)`. A nightly download reads
+`19.0.0+git202609141144.deb846b (git abc123456789)`: the last release, the
+commit's time in UTC, and the commit. A Homebrew `--HEAD`
 build reports `HEAD-deb846b (git abc123456789)`. A `cargo install` from git
 sets no version, so it prints `19.0.0 (git abc123456789)` too.
 
@@ -222,9 +216,6 @@ Commands find it themselves. It listens on `daemon.sock` in the state directory
 openable only by your user, with the token remote clients need beside it in
 `daemon.token`. Without one running everything behaves as it did before, and
 `--no-daemon` forces that for a single run.
-
-Windows has no Unix socket. A daemon there needs `--bind ADDR`, and every
-client needs `--daemon ADDR` and the token even on the same machine.
 
 From a script, start it and *wait* for it. The socket appears before the login
 finishes, and a command arriving early waits on the handshake for up to 30
@@ -646,9 +637,9 @@ Four ways to supply a password, in the order they are consulted:
 
 1. `--password-stdin`: read the first line of stdin, like `docker login`.
 2. `--password` / `SOULSEEK_PASSWORD`: convenient, but visible in `ps`.
-3. The **OS keychain** (macOS Keychain, Windows Credential Manager, Linux
-   Secret Service), under service `soulseek-rs` and your username. The TUI
-   stores your password here after a successful login.
+3. The **OS keychain** (macOS Keychain, Linux Secret Service), under service
+   `soulseek-rs` and your username. The TUI stores your password here after a
+   successful login.
 4. `password_cmd` / `--password-cmd`: a shell command whose stdout is the
    password, e.g. `pass show soulseek`. Best for headless boxes with no
    keychain.
@@ -773,7 +764,7 @@ soulfind instead of skipping.
 
 - **Format & Clippy**: `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings`.
-- **Test**: `cargo test --verbose` on Linux, macOS, and Windows.
+- **Test**: `cargo test --verbose` on Linux and macOS.
 - **End-to-end**: builds soulfind from source (LDC + `dub build :server`),
   points `SOULFIND_BIN` at it, and runs all four e2e suites with
   `SOULSEEK_E2E_REQUIRED=1`, so a missing server fails instead of skipping.

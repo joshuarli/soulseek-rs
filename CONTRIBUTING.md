@@ -22,7 +22,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-CI runs those on Linux, macOS and Windows, plus an end-to-end suite against a
+CI runs those on Linux and macOS, plus an end-to-end suite against a
 real [soulfind](https://github.com/soulfind-dev/soulfind) server. The e2e suites
 skip when no server is around, so `cargo test` stays green without one.
 [Development](./README.md#development) has the setup if you want to run them.

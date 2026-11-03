@@ -574,7 +574,6 @@ fn now_seconds() -> i64 {
 
 mod transport;
 
-#[cfg(unix)]
 pub use transport::bind_unix;
 pub use transport::{Listener, bind_tcp};
 

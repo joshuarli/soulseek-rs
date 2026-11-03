@@ -67,32 +67,21 @@ pub fn download_dir_for(
         .to_string()
 }
 
-/// A peer-chosen name made safe as one path component: separators and
-/// characters Windows refuses become `_`, so `../..` cannot climb out.
+/// A peer-chosen name made safe as one path component: separators and control
+/// characters become `_`, so `../..` cannot climb out.
 fn sanitize_path_component(name: &str) -> String {
     let mut out: String = name
         .chars()
         .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            '/' => '_',
             c if c.is_control() => '_',
             c => c,
         })
         .collect();
-    if out.is_empty() || out.ends_with(['.', ' ']) {
+    if out.is_empty() || out.ends_with('.') {
         out.push('_');
     }
-    if is_reserved(&out) {
-        out.insert(0, '_');
-    }
     out
-}
-
-/// Windows device names (`CON`, `COM1`, …) that cannot be a folder name.
-fn is_reserved(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (matches!(stem.get(..3), Some("COM" | "LPT"))
-            && matches!(stem.as_bytes().get(3..), Some([b'1'..=b'9'])))
 }
 
 #[cfg(test)]
@@ -159,6 +148,5 @@ mod tests {
         assert_eq!(download_dir_for("/dl", "/tmp/x", true), dl("_tmp_x"));
         assert_eq!(download_dir_for("/dl", "..", true), dl(".._"));
         assert_eq!(download_dir_for("/dl", "", true), dl("_"));
-        assert_eq!(download_dir_for("/dl", "com1", true), dl("_com1"));
     }
 }

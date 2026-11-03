@@ -140,8 +140,6 @@ fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
 /// overwrite it and the user can still recover or inspect it.
 fn set_aside(path: &Path, why: &str) {
     let bak = path.with_extension("json.bak");
-    // Windows rename fails when the target exists; drop the old backup.
-    let _ = std::fs::remove_file(&bak);
     match std::fs::rename(path, &bak) {
         Ok(()) => soulseek_rs::warn!(
             "State file {} is {why}; moved to {}",

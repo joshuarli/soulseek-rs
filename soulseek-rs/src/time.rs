@@ -219,7 +219,6 @@ fn utc_hhmm(unix: i64) -> String {
     format!("{:02}:{:02} ", seconds / 3_600, (seconds % 3_600) / 60)
 }
 
-#[cfg(unix)]
 fn local_hhmm(unix: i64) -> String {
     let time = unix as libc::time_t;
     let mut broken_down = std::mem::MaybeUninit::<libc::tm>::zeroed();
@@ -233,79 +232,6 @@ fn local_hhmm(unix: i64) -> String {
     // SAFETY: localtime_r returned non-null, so it initialized the struct.
     let broken_down = unsafe { broken_down.assume_init() };
     format!("{:02}:{:02} ", broken_down.tm_hour, broken_down.tm_min)
-}
-
-#[cfg(windows)]
-fn local_hhmm(unix: i64) -> String {
-    windows::local_hhmm(unix).unwrap_or_else(|| utc_hhmm(unix))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn local_hhmm(unix: i64) -> String {
-    utc_hhmm(unix)
-}
-
-#[cfg(windows)]
-mod windows {
-    #[repr(C)]
-    struct FileTime {
-        low: u32,
-        high: u32,
-    }
-
-    #[repr(C)]
-    struct WinSystemTime {
-        year: u16,
-        month: u16,
-        day_of_week: u16,
-        day: u16,
-        hour: u16,
-        minute: u16,
-        second: u16,
-        milliseconds: u16,
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn FileTimeToLocalFileTime(
-            file_time: *const FileTime,
-            local_file_time: *mut FileTime,
-        ) -> i32;
-        fn FileTimeToSystemTime(
-            file_time: *const FileTime,
-            system_time: *mut WinSystemTime,
-        ) -> i32;
-    }
-
-    pub fn local_hhmm(unix: i64) -> Option<String> {
-        let intervals = unix
-            .checked_add(11_644_473_600)?
-            .checked_mul(10_000_000)?;
-        let file_time = FileTime {
-            low: intervals as u32,
-            high: (intervals >> 32) as u32,
-        };
-        let mut local = FileTime { low: 0, high: 0 };
-        let mut system = WinSystemTime {
-            year: 0,
-            month: 0,
-            day_of_week: 0,
-            day: 0,
-            hour: 0,
-            minute: 0,
-            second: 0,
-            milliseconds: 0,
-        };
-        // SAFETY: both calls write into structs this function owns.
-        unsafe {
-            if FileTimeToLocalFileTime(&raw const file_time, &raw mut local) == 0
-                || FileTimeToSystemTime(&raw const local, &raw mut system) == 0
-            {
-                return None;
-            }
-        }
-        Some(format!("{:02}:{:02} ", system.hour, system.minute))
-    }
 }
 
 #[cfg(test)]

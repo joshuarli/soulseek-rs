@@ -102,17 +102,10 @@ fn mint_token() -> String {
         })
 }
 
-/// Make a secret readable by nobody else. A no-op where the platform has no
-/// such notion, which is why TCP is opt-in rather than the default.
-#[cfg(unix)]
+/// Make a secret readable by nobody else.
 fn restrict(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-const fn restrict(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 /// Whether a daemon is listening on the local socket right now.
@@ -123,17 +116,9 @@ const fn restrict(_path: &Path) -> std::io::Result<()> {
 #[must_use]
 pub fn local_daemon() -> Option<PathBuf> {
     let path = socket_path()?;
-    #[cfg(unix)]
-    {
-        std::os::unix::net::UnixStream::connect(&path)
-            .ok()
-            .map(|_| path)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
-    }
+    std::os::unix::net::UnixStream::connect(&path)
+        .ok()
+        .map(|_| path)
 }
 
 /// Run the daemon until it is asked to stop.
@@ -158,14 +143,11 @@ pub fn run(
     // Bind before logging in: a second daemon should fail in a millisecond,
     // not after a full login handshake against the server.
     let mut listeners = Vec::new();
-    #[cfg(unix)]
-    {
-        let path = state_dir.join(SOCKET_NAME);
-        listeners.push(server::bind_unix(&path).map_err(|e| {
-            CliError::usage(format!("cannot listen on {}: {e}", path.display()))
-        })?);
-        ctx.out.status(&format!("listening on {}", path.display()));
-    }
+    let path = state_dir.join(SOCKET_NAME);
+    listeners.push(server::bind_unix(&path).map_err(|e| {
+        CliError::usage(format!("cannot listen on {}: {e}", path.display()))
+    })?);
+    ctx.out.status(&format!("listening on {}", path.display()));
     if let Some(address) = bind {
         listeners.push(server::bind_tcp(address).map_err(|e| {
             CliError::connection(format!("cannot listen on {address}: {e}"))
@@ -175,13 +157,6 @@ pub fn run(
              `soulseek-rs daemon token`)"
         ));
     }
-    if listeners.is_empty() {
-        return Err(CliError::usage(
-            "nothing to listen on: pass --bind on a platform without Unix \
-             sockets",
-        ));
-    }
-
     let session = Session::open(ctx)?;
     if let Some(slots) = upload_slots {
         session.client.set_upload_slots(usize::from(slots));
@@ -312,7 +287,6 @@ ready — leave this running.
 /// Remove the socket file so the next start does not have to reason about
 /// whether it is stale.
 fn cleanup() {
-    #[cfg(unix)]
     if let Some(path) = socket_path() {
         let _ = std::fs::remove_file(path);
     }
@@ -546,7 +520,6 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_token_file_is_readable_by_nobody_else() {
         use std::os::unix::fs::PermissionsExt;
@@ -566,7 +539,6 @@ mod tests {
         assert_eq!(token.len(), 64, "an empty secret must never authenticate");
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_socket_left_by_a_dead_daemon_is_replaced_not_refused() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -580,7 +552,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_second_daemon_refuses_to_steal_a_live_socket() {
         let dir = tempfile::tempdir().expect("a temp dir");

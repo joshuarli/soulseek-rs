@@ -421,13 +421,6 @@ mod tests {
             loop {
                 let (n, from) = match socket.recv_from(&mut buf) {
                     Ok(received) => received,
-                    // Windows reports a reply that met an already-closed
-                    // client socket on the next receive; the gateway is fine.
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::ConnectionReset =>
-                    {
-                        continue;
-                    }
                     Err(_) => break,
                 };
                 let request = buf[..n].to_vec();

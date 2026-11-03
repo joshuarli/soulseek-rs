@@ -19,7 +19,6 @@ fn a_timed_out_connect_parks_the_actor_in_disconnected() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn the_server_socket_keeps_itself_alive() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

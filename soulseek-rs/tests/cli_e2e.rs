@@ -367,11 +367,11 @@ fn listing_skills_reports_without_writing_anything() {
     );
 }
 
-/// fish is the shell the whole round trip can be driven for on every platform:
-/// its completions directory hangs off `XDG_CONFIG_HOME`, so nothing outside
-/// the scratch directory is read or written. bash and zsh also append a line
-/// to a real rc file under `$HOME`, which is not a thing to point a test at on
-/// Windows — the unit tests cover that half.
+/// fish is the shell the whole round trip can be driven for: its completions
+/// directory hangs off `XDG_CONFIG_HOME`, so nothing outside the scratch
+/// directory is read or written. bash and zsh also append a line to a real rc
+/// file under `$HOME`, which is not a thing to point a test at — the unit tests
+/// cover that half.
 #[test]
 fn installing_completions_is_repeatable_and_reversible() {
     let target = Scratch::new("completions");
@@ -608,8 +608,9 @@ impl DaemonFixture {
     fn wait_until_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(45);
         while Instant::now() < deadline {
-            #[cfg(unix)]
-            if std::os::unix::net::UnixStream::connect(&self.socket).is_ok() {
+            let ready =
+                std::os::unix::net::UnixStream::connect(&self.socket).is_ok();
+            if ready {
                 // Binding happens first, so also wait for the login to land.
                 if self.answers() {
                     return;
