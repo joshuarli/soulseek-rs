@@ -108,9 +108,15 @@ jobs:
               cp target/${{ matrix.target }}/dist/soulseek-rs soulseek-rs-${{ matrix.target }}-static
             '
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.docker_platform == ''
         with:
           name: soulseek-rs-${{ matrix.target }}
-          path: soulseek-rs-*
+          path: soulseek-rs-${{ matrix.target }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.docker_platform != ''
+        with:
+          name: soulseek-rs-${{ matrix.target }}
+          path: soulseek-rs-${{ matrix.target }}-static
 
   release:
     name: Create pre-release
