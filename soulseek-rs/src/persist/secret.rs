@@ -1,5 +1,5 @@
 use crate::api::SessionApi;
-use color_eyre::Result;
+use crate::error::Result;
 
 /// Where passwords live. The real implementation is the OS keychain
 /// ([`KeyringStore`]); tests use an in-memory fake. Passwords are never
@@ -24,18 +24,20 @@ const SERVICE: &str = "soulseek-rs";
 impl SecretStore for KeyringStore {
     fn get(&self, username: &str) -> Result<Option<String>> {
         let entry = keyring::Entry::new(SERVICE, username)
-            .map_err(|e| color_eyre::eyre::eyre!("keyring: {e}"))?;
+            .map_err(|e| crate::error::Error::msg(format!("keyring: {e}")))?;
         match entry.get_password() {
             Ok(password) => Ok(Some(password)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(color_eyre::eyre::eyre!("keyring: {e}")),
+            Err(e) => {
+                Err(crate::error::Error::msg(format!("keyring: {e}")))
+            }
         }
     }
 
     fn set(&self, username: &str, password: &str) -> Result<()> {
         keyring::Entry::new(SERVICE, username)
             .and_then(|entry| entry.set_password(password))
-            .map_err(|e| color_eyre::eyre::eyre!("keyring: {e}"))
+            .map_err(|e| crate::error::Error::msg(format!("keyring: {e}")))
     }
 
     fn delete(&self, username: &str) -> Result<()> {
@@ -43,7 +45,9 @@ impl SecretStore for KeyringStore {
             .and_then(|entry| entry.delete_credential())
         {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(color_eyre::eyre::eyre!("keyring: {e}")),
+            Err(e) => {
+                Err(crate::error::Error::msg(format!("keyring: {e}")))
+            }
         }
     }
 }
@@ -75,8 +79,8 @@ pub fn change_password(
 
 /// Resolve the password with precedence: CLI/env > keychain > `password_cmd`.
 ///
-/// `cli_password` already has env merged in by clap. Returns `None` when no
-/// source has one — the caller shows the login screen.
+/// `cli_password` already has env merged in by the argument parser. Returns
+/// `None` when no source has one — the caller shows the login screen.
 ///
 /// Keychain errors are downgraded to "not found": on headless boxes without
 /// a secret service the fallbacks must still work.
@@ -126,7 +130,7 @@ pub struct MemoryStore {
 impl SecretStore for MemoryStore {
     fn get(&self, username: &str) -> Result<Option<String>> {
         if self.fail {
-            return Err(color_eyre::eyre::eyre!("no secret service"));
+            return Err(crate::error::Error::msg("no secret service"));
         }
         Ok(self
             .secrets

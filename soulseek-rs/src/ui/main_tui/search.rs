@@ -3,7 +3,7 @@ use crate::models::{
     ChatMessage, FileDisplayData, FocusedPane, MessageDirection, SearchEntry,
     SearchStatus,
 };
-use chrono::Local;
+use crate::time::Timestamp;
 use std::{
     sync::{
         Arc,
@@ -146,7 +146,7 @@ impl MainTui {
                 direction: MessageDirection::Incoming,
                 peer: msg.username().to_string(),
                 text: msg.message().to_string(),
-                at: Local::now(),
+                at: Timestamp::now(),
             });
             // Badge the inbox when it isn't currently open.
             if !self.state.show_messages {
@@ -173,7 +173,7 @@ impl MainTui {
                     direction: MessageDirection::Outgoing,
                     peer: recipient.to_string(),
                     text: text.to_string(),
-                    at: Local::now(),
+                    at: Timestamp::now(),
                 });
                 // Land in the chat box on the conversation just started.
                 self.state.open_chat(recipient.to_string());
@@ -200,7 +200,7 @@ impl MainTui {
                 direction: MessageDirection::Outgoing,
                 peer,
                 text,
-                at: Local::now(),
+                at: Timestamp::now(),
             }),
             Err(e) => soulseek_rs::warn!("Failed to send message: {e}"),
         }

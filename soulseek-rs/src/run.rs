@@ -2,8 +2,8 @@
 //! whether this run opens a session of its own or borrows a daemon's.
 
 use crate::cli::{
-    Cli, Commands, ConfigCommand, DaemonCommand, SharesCommand, WishCommand,
-    parse_server_address,
+    Cli, Commands, ConfigCommand, DaemonCommand, Invocation, SharesCommand,
+    WishCommand, parse_server_address,
 };
 use crate::commands::Ctx;
 use crate::models::TuiExit;
@@ -11,13 +11,58 @@ use crate::output::{CliError, CliResult, Exit, Out};
 use crate::persist::secret::SecretStore;
 use crate::ui::launch_main_tui;
 use soulseek_rs::{ClientSettings, ClientVersion, PeerAddress};
-use std::io::{BufRead, IsTerminal};
+use std::ffi::OsString;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, io};
 
-pub fn run(mut cli: Cli, out: &Out) -> CliResult {
+pub fn run<I, T>(args: I) -> ExitCode
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let invocation = match crate::cli::parse(args) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return Exit::Usage.into();
+        }
+    };
+
+    match invocation {
+        Invocation::Help(text) => write_stdout(&text),
+        Invocation::Version(text) => write_stdout(&format!("{text}\n")),
+        Invocation::Run(cli) => {
+            init_logging(&cli);
+            let out = Out::new(cli.json, cli.quiet);
+            match dispatch(*cli, &out) {
+                Ok(()) => Exit::Ok.into(),
+                Err(error) => {
+                    out.error(&error.message);
+                    error.exit.into()
+                }
+            }
+        }
+    }
+}
+
+fn write_stdout(text: &str) -> ExitCode {
+    match io::stdout().write_all(text.as_bytes()) {
+        Ok(()) => Exit::Ok.into(),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+            Exit::Ok.into()
+        }
+        Err(error) => {
+            eprintln!("error: cannot write stdout: {error}");
+            Exit::Failure.into()
+        }
+    }
+}
+
+fn dispatch(mut cli: Cli, out: &Out) -> CliResult {
     // Before anything opens a socket: every entry point that logs in — the
     // TUI, `serve`, one-shot commands, the daemon — holds a socket per peer,
     // and the soft limit a shell hands its children (256 on macOS) is gone

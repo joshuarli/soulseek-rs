@@ -1,15 +1,14 @@
 //! Tab completion for the shell: `completions`.
 //!
-//! The script is generated from the same `clap` definition the binary parses
+//! The script is generated from the same command schema the binary parses
 //! with, so it never drifts. Installing means putting it where the shell
 //! already looks — which is enough on its own only for fish; bash and zsh each
 //! get one `source` line appended to their rc file, marked so `uninstall` can
 //! take back exactly what was added and nothing else.
 
 use super::{unwritable, xdg};
-use crate::cli::{Cli, CompletionsArgs, CompletionsCommand, Shell};
+use crate::cli::{CompletionsArgs, CompletionsCommand, Shell};
 use crate::output::{CliError, CliResult, CompletionRecord, Exit, Out};
-use clap::CommandFactory;
 use directories::UserDirs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -40,7 +39,7 @@ struct Target {
 impl Target {
     fn record(&self, action: &str) -> CompletionRecord {
         CompletionRecord {
-            shell: self.shell.generator().to_string(),
+            shell: self.shell.name().to_string(),
             path: self.script.display().to_string(),
             action: action.to_string(),
         }
@@ -48,16 +47,6 @@ impl Target {
 
     fn source_line(&self) -> String {
         format!("source \"{}\" {MARKER}", self.script.display())
-    }
-}
-
-impl Shell {
-    const fn generator(self) -> clap_complete::Shell {
-        match self {
-            Self::Bash => clap_complete::Shell::Bash,
-            Self::Zsh => clap_complete::Shell::Zsh,
-            Self::Fish => clap_complete::Shell::Fish,
-        }
     }
 }
 
@@ -70,11 +59,7 @@ pub fn run(out: &Out, command: &CompletionsCommand) -> CliResult {
 }
 
 pub fn man() -> CliResult {
-    let mut page = Vec::new();
-    clap_mangen::Man::new(Cli::command().about("Soulseek client in Rust"))
-        .render(&mut page)
-        .expect("a Vec accepts every write");
-    print(&page)
+    print(crate::cli::man_page().as_bytes())
 }
 
 fn print(bytes: &[u8]) -> CliResult {
@@ -116,16 +101,9 @@ fn uninstall(out: &Out, targets: &[Target]) -> CliResult {
     Ok(())
 }
 
-/// The completion script as this binary's own argument parser defines it.
+/// The completion script as this binary's own command schema defines it.
 fn script(shell: Shell) -> Vec<u8> {
-    let mut buffer = Vec::new();
-    clap_complete::generate(
-        shell.generator(),
-        &mut Cli::command(),
-        BIN,
-        &mut buffer,
-    );
-    buffer
+    crate::cli::completion_script(shell).into_bytes()
 }
 
 /// Which shells to act on. Naming shells aims the command at exactly those;
@@ -309,7 +287,8 @@ mod tests {
     /// The rc line only works because sourcing the script registers the
     /// completion rather than just defining a function. zsh is the one that
     /// could plausibly go the other way: an autoload-style `#compdef` file does
-    /// nothing on its own, so the install rests on the footer clap emits.
+    /// nothing on its own, so the install rests on the footer the generated
+    /// script emits.
     #[test]
     fn a_sourced_script_registers_the_command() {
         let zsh = String::from_utf8(script(Shell::Zsh)).expect("utf-8");

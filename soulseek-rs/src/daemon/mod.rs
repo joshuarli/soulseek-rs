@@ -418,7 +418,7 @@ fn restore(
                 peer: message.peer,
                 outgoing: message.outgoing,
                 text: message.text,
-                at: message.at.timestamp(),
+                at: message.at.unix(),
             })
             .collect(),
     );
@@ -482,9 +482,7 @@ fn save(
             peer: message.peer,
             outgoing: message.outgoing,
             text: message.text,
-            at: chrono::DateTime::from_timestamp(message.at, 0)
-                .unwrap_or_default()
-                .into(),
+            at: crate::time::Timestamp::from_unix(message.at),
         })
         .collect();
     let _ = store.save_messages(&messages);

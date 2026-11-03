@@ -1,4 +1,4 @@
-use color_eyre::Result;
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -245,14 +245,17 @@ impl FileConfig {
                 return Ok(Self::default());
             }
             Err(e) => {
-                return Err(color_eyre::eyre::eyre!(
+                return Err(crate::error::Error::msg(format!(
                     "Cannot read {}: {e}",
                     path.display()
-                ));
+                )));
             }
         };
         toml::from_str(&text).map_err(|e| {
-            color_eyre::eyre::eyre!("Malformed {}: {e}", path.display())
+            crate::error::Error::msg(format!(
+                "Malformed {}: {e}",
+                path.display()
+            ))
         })
     }
 
@@ -283,7 +286,7 @@ fn parse_opt<T: std::str::FromStr>(
 }
 
 /// Fully-resolved settings after layering CLI (which already includes env via
-/// clap) over the config file over built-in defaults.
+/// the argument parser) over the config file over built-in defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     pub username: Option<String>,

@@ -150,11 +150,11 @@ A `.deb` or `.rpm` does not update itself. Install the newer file over it. A
 nightly sorts above the release it follows, so going back to stable is a
 downgrade. In a script apt refuses one without `--allow-downgrades`, while dnf
 goes ahead. Both carry the man page and completions for bash, zsh and fish.
-A release download prints the plain number, `19.0.0`. Any Nix build, and a
-nightly download, reads `19.0.0+git202609141144.deb846b`: the last release, the
-commit's time in UTC, and the commit. A Homebrew `--HEAD` build reports
-`HEAD-deb846b`. A `cargo install` from git sets no version, so it prints
-`19.0.0` too.
+A release download prints `19.0.0 (git abc123456789)`. Any Nix build, and a
+nightly download, reads `19.0.0+git202609141144.deb846b (git abc123456789)`:
+the last release, the commit's time in UTC, and the commit. A Homebrew `--HEAD`
+build reports `HEAD-deb846b (git abc123456789)`. A `cargo install` from git
+sets no version, so it prints `19.0.0 (git abc123456789)` too.
 
 From source, `cargo build --release` leaves the binary at
 `target/release/soulseek-rs`. To build your own client on the protocol library,
@@ -164,8 +164,10 @@ To package it for a distribution: a musl build is static, a glibc build links
 only libc, libm and libgcc_s,
 `soulseek-rs completions print <shell>` and `soulseek-rs man` write the
 completion scripts and the man page to stdout, and a build with
-`SOULSEEK_RS_VERSION` set reports that instead of the crate version. The nfpm
-recipe behind the `.deb` and `.rpm` is in [`packaging/`](packaging).
+`SOULSEEK_RS_VERSION` set reports that instead of the crate version. The git
+SHA is embedded at build time; a source archive with no `.git` embeds
+`000000000000` unless `SOULSEEK_RS_GIT_SHA` names the commit. The nfpm recipe
+behind the `.deb` and `.rpm` is in [`packaging/`](packaging).
 
 ## Usage
 
@@ -537,8 +539,8 @@ soulseek-rs skills install --dir .claude/skills   # commit it with the repo
 
 ### Shell completions
 
-Tab completion comes from the same `clap` definition the binary parses with, so
-it never drifts from `--help`:
+Tab completion comes from the same command schema the binary parses with, so it
+never drifts from `--help`:
 
 ```bash
 soulseek-rs completions install

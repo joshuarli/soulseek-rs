@@ -9,7 +9,7 @@ use crate::ui::{
     GLYPH_CURSOR, accent_style, dimmed_style, error_style, get_spinner_char,
     info_style, mask, pane_block, primary_style, title_style, warning_style,
 };
-use color_eyre::Result;
+use crate::error::Result;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{

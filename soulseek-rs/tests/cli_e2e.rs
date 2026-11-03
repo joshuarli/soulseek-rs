@@ -164,8 +164,8 @@ fn missing_credentials_are_a_usage_error_with_a_pointer_to_the_fix() {
 
 #[test]
 fn a_falsey_boolean_environment_variable_is_accepted() {
-    // `DISABLE_LISTENER=1` used to abort every invocation with a clap parse
-    // error, which made the binary unusable from a container.
+    // `DISABLE_LISTENER=1` used to abort every invocation with an argument
+    // parse error, which made the binary unusable from a container.
     for value in ["1", "0", "true", "false", "yes", ""] {
         let output = command(&["--no-config", "search", "anything"])
             .env("SOULSEEK_NO_LISTENER", value)

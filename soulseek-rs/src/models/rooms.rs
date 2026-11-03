@@ -1,5 +1,5 @@
 use crate::models::{LogView, WrappedLog};
-use chrono::{DateTime, Local};
+use crate::time::Timestamp;
 use soulseek_rs::types::{RoomEvent, RoomInfo};
 
 /// One line in a room's chat log. A `None` username marks a system line
@@ -8,8 +8,8 @@ use soulseek_rs::types::{RoomEvent, RoomInfo};
 pub struct RoomLine {
     pub username: Option<String>,
     pub text: String,
-    /// Local wall-clock time the line was appended.
-    pub at: DateTime<Local>,
+    /// When the line was appended, displayed in local time.
+    pub at: Timestamp,
 }
 
 impl RoomLine {
@@ -17,14 +17,14 @@ impl RoomLine {
         Self {
             username: Some(username),
             text,
-            at: Local::now(),
+            at: Timestamp::now(),
         }
     }
     fn system(text: String) -> Self {
         Self {
             username: None,
             text,
-            at: Local::now(),
+            at: Timestamp::now(),
         }
     }
 }

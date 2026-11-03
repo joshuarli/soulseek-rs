@@ -9,8 +9,8 @@ use serde::Serialize;
 use std::io::{IsTerminal, Write};
 
 /// Documented exit statuses. Anything a wrapper script needs to branch on has
-/// its own code; clap already uses 2 for argument errors, so config problems
-/// share it.
+/// its own code; the argument parser already uses 2 for argument errors, so
+/// config problems share it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Exit {
     Ok = 0,

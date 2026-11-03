@@ -28,12 +28,9 @@ workspace = true
 [dependencies]
 soulseek-rs-lib = { version = "19.1.0", path = "../soulseek-rs-lib" }
 
-clap = { version = "4.6.2", features = ["derive", "color", "wrap_help", "env"] }
-clap_complete = "4.6.7"
-clap_mangen = "0.3.3"
+lexopt = "0.3"
 ratatui = "0.30.2"
 unicode-width = "0.2"
-color-eyre = "0.6.5"
 dotenv = "0.15.0"
 igd-next = "0.17"
 serde = { version = "1", features = ["derive"] }
@@ -44,7 +41,6 @@ directories = "6"
 # + async-io + crypto-rust) instead of sync-secret-service, which links the
 # system libdbus and breaks builds without libdbus-1-dev.
 keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
 getrandom = "0.4.3"
 
 [dev-dependencies]

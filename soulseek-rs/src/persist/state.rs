@@ -6,7 +6,7 @@
 //! rather than failing startup. Writes are atomic (tmp file + rename) so a
 //! crash never leaves a torn file.
 
-use color_eyre::Result;
+use crate::error::Result;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use soulseek_rs::{DownloadStatus, types::Download};
@@ -48,7 +48,7 @@ pub struct PersistedMessage {
     /// True when we sent it, false when the peer did.
     pub outgoing: bool,
     pub text: String,
-    pub at: chrono::DateTime<chrono::Local>,
+    pub at: crate::time::Timestamp,
 }
 
 pub struct StateStore {
@@ -209,10 +209,27 @@ mod tests {
             peer: "alice".into(),
             outgoing: true,
             text: "hey".into(),
-            at: chrono::Local::now(),
+            at: crate::time::Timestamp::now(),
         }];
         store.save_messages(&messages).unwrap();
         assert_eq!(store.load_messages(), messages);
+    }
+
+    #[test]
+    fn a_message_timestamp_from_an_older_build_still_loads() {
+        let (tmp, store) = store();
+        let path = tmp.path().join("state").join("messages.json");
+        std::fs::create_dir_all(path.parent().expect("a parent"))
+            .expect("the state directory");
+        std::fs::write(
+            &path,
+            r#"{"version":0,"data":[{"peer":"alice","outgoing":false,"text":"hey","at":"2023-11-14T22:13:20.123456789+00:00"}]}"#,
+        )
+        .expect("an older state file");
+
+        let messages = store.load_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].at.unix(), 1_700_000_000);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::models::{BrowseTabs, FileDisplayData, RoomsState, SettingsState};
-use chrono::{DateTime, Local};
+use crate::time::Timestamp;
 use ratatui::{layout::Rect, text::Line, widgets::TableState};
 use soulseek_rs::{DownloadStatus, types::Download};
 use std::sync::atomic::AtomicBool;
@@ -252,8 +252,8 @@ pub struct ChatMessage {
     /// The other party: the sender for incoming, the recipient for outgoing.
     pub peer: String,
     pub text: String,
-    /// Local wall-clock time the message was sent or received.
-    pub at: DateTime<Local>,
+    /// When the message was sent or received, displayed in local time.
+    pub at: Timestamp,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -554,7 +554,7 @@ mod tests {
             direction: MessageDirection::Outgoing,
             peer: peer.to_string(),
             text: "hi".to_string(),
-            at: Local::now(),
+            at: Timestamp::now(),
         });
     }
 

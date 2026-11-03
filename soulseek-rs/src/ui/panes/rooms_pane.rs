@@ -227,7 +227,7 @@ fn render_messages(
             return Vec::new();
         }
         let time =
-            Span::styled(l.at.format("%H:%M ").to_string(), dimmed_style());
+            Span::styled(l.at.hhmm(), dimmed_style());
         match &l.username {
             Some(user) => wrap_chat_line(
                 vec![time, Span::styled(format!("<{user}> "), info_style())],

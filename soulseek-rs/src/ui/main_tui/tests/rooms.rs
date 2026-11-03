@@ -47,7 +47,7 @@ fn slash_filters_the_open_conversation() {
             direction: MessageDirection::Incoming,
             peer: "bob".to_string(),
             text: text.to_string(),
-            at: chrono::Local::now(),
+            at: crate::time::Timestamp::now(),
         });
     }
     tui.state.chat_peer = Some("bob".to_string());

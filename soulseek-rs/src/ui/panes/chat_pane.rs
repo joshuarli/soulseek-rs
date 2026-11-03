@@ -127,7 +127,7 @@ fn render_messages(
         };
         wrap_chat_line(
             vec![
-                Span::styled(m.at.format("%H:%M ").to_string(), dimmed_style()),
+                Span::styled(m.at.hhmm(), dimmed_style()),
                 Span::styled(format!("<{sender}> "), sender_style),
             ],
             &m.text,

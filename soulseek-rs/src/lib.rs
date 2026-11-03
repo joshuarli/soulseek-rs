@@ -7,12 +7,14 @@ pub mod cli;
 pub mod commands;
 pub mod daemon;
 pub(crate) mod directories;
+pub mod error;
 pub mod models;
 pub mod output;
 pub mod persist;
 pub(crate) mod port_mapping;
 pub mod remote;
 pub mod run;
+pub mod time;
 pub(crate) mod ui;
 
 /// The interactive window, reachable so an integration test can drive it

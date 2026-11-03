@@ -162,20 +162,19 @@ fn ours(file: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::Cli;
-    use clap::CommandFactory;
+    use crate::cli::command::{self, CommandSpec};
 
     /// Every command this binary answers, spelled the way a user types it.
     /// Groups contribute their verbs rather than themselves — nobody runs a
     /// bare `room`.
-    fn command_paths(command: &clap::Command, prefix: &str) -> Vec<String> {
+    fn command_paths(spec: &CommandSpec, prefix: &str) -> Vec<String> {
         let mut paths = Vec::new();
-        for sub in command.get_subcommands() {
-            if sub.get_name() == "help" {
+        for sub in &spec.subcommands {
+            if sub.name == "help" {
                 continue;
             }
-            let path = format!("{prefix}{}", sub.get_name());
-            if sub.get_subcommands().next().is_some() {
+            let path = format!("{prefix}{}", sub.name);
+            if sub.has_subcommands() {
                 paths.extend(command_paths(sub, &format!("{path} ")));
             } else {
                 paths.push(path);
@@ -193,7 +192,7 @@ mod tests {
     /// section, which is the only place written as a bold quoted invocation.
     #[test]
     fn the_skill_documents_every_command() {
-        let paths = command_paths(&Cli::command(), "");
+        let paths = command_paths(&command::root_spec(), "");
         assert!(paths.len() > 10, "expected the full command surface");
         for path in paths {
             assert!(

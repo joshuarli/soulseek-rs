@@ -253,13 +253,13 @@ mod tests {
             direction: MessageDirection::Incoming,
             peer: "alice".into(),
             text: "hey".into(),
-            at: chrono::Local::now(),
+            at: crate::time::Timestamp::now(),
         });
         state.messages.push(ChatMessage {
             direction: MessageDirection::Outgoing,
             peer: "alice".into(),
             text: "hey yourself".into(),
-            at: chrono::Local::now(),
+            at: crate::time::Timestamp::now(),
         });
 
         let snapshot = Snapshot::capture(&state);
@@ -280,7 +280,7 @@ mod tests {
                 direction: MessageDirection::Incoming,
                 peer: "alice".into(),
                 text: i.to_string(),
-                at: chrono::Local::now(),
+                at: crate::time::Timestamp::now(),
             });
         }
         let snapshot = Snapshot::capture(&state);

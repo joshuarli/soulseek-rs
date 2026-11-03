@@ -12,7 +12,7 @@ use crate::persist::{
     snapshot::{Snapshot, restore_messages, restore_searches},
     state::{PersistedMessage, StateStore},
 };
-use color_eyre::Result;
+use crate::error::Result;
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyEventKind, poll},
@@ -79,9 +79,7 @@ impl MainTui {
                 peer: message.peer,
                 outgoing: message.outgoing,
                 text: message.text,
-                at: chrono::DateTime::from_timestamp(message.at, 0)
-                    .unwrap_or_default()
-                    .into(),
+                at: crate::time::Timestamp::from_unix(message.at),
             })
             .collect();
         restore_messages(&mut self.state, &history);
