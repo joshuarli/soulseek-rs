@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 /// Soulseek file attribute codes the network agrees on.
 pub const ATTR_BITRATE: u32 = 0;
 pub const ATTR_DURATION: u32 = 1;
+pub const ATTR_SAMPLE_RATE: u32 = 4;
+pub const ATTR_BIT_DEPTH: u32 = 5;
 
 /// What to keep out of the raw result set. Every field is a further
 /// restriction: a candidate has to satisfy all of them.
@@ -102,6 +104,8 @@ pub fn candidates(
                 path: file.name.clone(),
                 size: file.size,
                 bitrate: file.attribs.get(&ATTR_BITRATE).copied(),
+                sample_rate: file.attribs.get(&ATTR_SAMPLE_RATE).copied(),
+                bit_depth: file.attribs.get(&ATTR_BIT_DEPTH).copied(),
                 duration: file.attribs.get(&ATTR_DURATION).copied(),
                 free_slot: result.slots > 0,
                 slots: result.slots,
@@ -115,17 +119,45 @@ pub fn candidates(
     out
 }
 
+/// Extensions that decode without discarding samples. A lossless copy ranks
+/// above every lossy one even when the lossy copy advertises more kbps: the
+/// advertised number is a compression rate, not a fidelity ceiling.
+const LOSSLESS_EXTENSIONS: &[&str] = &[
+    "aif", "aiff", "alac", "ape", "dff", "dsf", "flac", "tta", "wav", "wv",
+];
+
+fn is_lossless(path: &str) -> bool {
+    path.rsplit(['/', '\\'])
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(_, ext)| {
+            LOSSLESS_EXTENSIONS
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
+}
+
 /// Order results. Every mode ends with the same user/path tiebreak so the
 /// output of two identical runs is identical.
 pub fn rank(items: &mut [SearchRecord], sort: SortKey) {
     items.sort_by(|a, b| {
         let primary = match sort {
-            SortKey::Best => b
-                .free_slot
-                .cmp(&a.free_slot)
+            SortKey::Best => is_lossless(&b.path)
+                .cmp(&is_lossless(&a.path))
+                .then_with(|| {
+                    b.bit_depth
+                        .unwrap_or(0)
+                        .cmp(&a.bit_depth.unwrap_or(0))
+                })
+                .then_with(|| {
+                    b.sample_rate
+                        .unwrap_or(0)
+                        .cmp(&a.sample_rate.unwrap_or(0))
+                })
                 .then_with(|| {
                     b.bitrate.unwrap_or(0).cmp(&a.bitrate.unwrap_or(0))
                 })
+                .then_with(|| b.free_slot.cmp(&a.free_slot))
                 .then_with(|| b.speed.cmp(&a.speed))
                 .then_with(|| b.size.cmp(&a.size)),
             SortKey::Size => b.size.cmp(&a.size),
@@ -675,20 +707,23 @@ struct JsonRequest {
 mod tests {
     use super::*;
     use soulseek_rs::File;
-    use std::collections::HashMap;
 
-    fn file(name: &str, size: u64, bitrate: Option<u32>) -> File {
-        let mut attribs = HashMap::new();
-        if let Some(bitrate) = bitrate {
-            attribs.insert(ATTR_BITRATE, bitrate);
-            attribs.insert(ATTR_DURATION, 200);
-        }
+    fn file_with(name: &str, size: u64, attribs: &[(u32, u32)]) -> File {
         File {
             username: String::new(),
             name: name.to_string(),
             size,
-            attribs,
+            attribs: attribs.iter().copied().collect(),
         }
+    }
+
+    fn file(name: &str, size: u64, bitrate: Option<u32>) -> File {
+        let attribs: Vec<(u32, u32)> = bitrate
+            .map(|bitrate| {
+                vec![(ATTR_BITRATE, bitrate), (ATTR_DURATION, 200)]
+            })
+            .unwrap_or_default();
+        file_with(name, size, &attribs)
     }
 
     fn result(
@@ -902,11 +937,91 @@ mod tests {
     }
 
     #[test]
-    fn best_prefers_a_free_slot_over_a_higher_bitrate() {
+    fn best_prefers_a_higher_bitrate_over_a_free_slot() {
         let mut found = candidates(&sample(), &Filter::default());
         rank(&mut found, SortKey::Best);
-        assert_eq!(found[0].path, "c\\good.mp3");
-        assert_eq!(found[0].user, "fast");
+        assert_eq!(found[0].path, "b\\best.mp3");
+        assert_eq!(found[0].user, "busy");
+    }
+
+    #[test]
+    fn best_ranks_lossless_above_a_higher_bitrate_lossy_file() {
+        let lossy = result(
+            "mp3_peer",
+            1,
+            100,
+            vec![file("track.mp3", 1, Some(320))],
+        );
+        let lossless = result(
+            "flac_peer",
+            0,
+            100,
+            vec![file_with("track.FLAC", 1, &[(ATTR_BITRATE, 900)])],
+        );
+        let mut found =
+            candidates(&[lossy, lossless], &Filter::default());
+        rank(&mut found, SortKey::Best);
+        assert_eq!(found[0].path, "track.FLAC");
+    }
+
+    #[test]
+    fn best_orders_lossless_by_bit_depth_then_sample_rate() {
+        let peer = result(
+            "peer",
+            1,
+            1,
+            vec![
+                file_with(
+                    "cd.flac",
+                    1,
+                    &[
+                        (ATTR_BITRATE, 1000),
+                        (ATTR_SAMPLE_RATE, 44_100),
+                        (ATTR_BIT_DEPTH, 16),
+                    ],
+                ),
+                file_with(
+                    "hires.flac",
+                    1,
+                    &[
+                        (ATTR_BITRATE, 800),
+                        (ATTR_SAMPLE_RATE, 96_000),
+                        (ATTR_BIT_DEPTH, 24),
+                    ],
+                ),
+                file_with(
+                    "studio.flac",
+                    1,
+                    &[
+                        (ATTR_BITRATE, 900),
+                        (ATTR_SAMPLE_RATE, 48_000),
+                        (ATTR_BIT_DEPTH, 24),
+                    ],
+                ),
+            ],
+        );
+        let mut found = candidates(&[peer], &Filter::default());
+        rank(&mut found, SortKey::Best);
+        assert_eq!(
+            paths_of(&found),
+            ["hires.flac", "studio.flac", "cd.flac"]
+        );
+    }
+
+    #[test]
+    fn best_puts_unknown_bitrate_after_known_bitrate() {
+        let peer = result(
+            "peer",
+            1,
+            1,
+            vec![
+                file("unknown.mp3", 1, None),
+                file("known.mp3", 1, Some(128)),
+            ],
+        );
+        let mut found = candidates(&[peer], &Filter::default());
+        rank(&mut found, SortKey::Best);
+        assert_eq!(paths_of(&found), ["known.mp3", "unknown.mp3"]);
     }
 
     #[test]

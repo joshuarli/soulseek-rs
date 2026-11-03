@@ -179,6 +179,8 @@ pub struct SearchRecord {
     pub path: String,
     pub size: u64,
     pub bitrate: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u32>,
     pub duration: Option<u32>,
     pub free_slot: bool,
     /// The peer's free upload slots as it reported them, for a picker that
@@ -610,6 +612,8 @@ mod tests {
             path: "@@dir\\01 - Track.mp3".into(),
             size: 4096,
             bitrate: Some(320),
+            sample_rate: Some(44_100),
+            bit_depth: Some(16),
             duration: Some(210),
             free_slot: true,
             slots: 1,
@@ -660,6 +664,8 @@ mod tests {
         assert_eq!(json["user"], "bob");
         assert_eq!(json["size"], 4096);
         assert_eq!(json["bitrate"], 320);
+        assert_eq!(json["sample_rate"], 44_100);
+        assert_eq!(json["bit_depth"], 16);
         assert_eq!(json["duration"], 210);
         assert_eq!(json["free_slot"], true);
         assert_eq!(json["slots"], 1);

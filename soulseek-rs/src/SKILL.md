@@ -94,7 +94,7 @@ that form; the columns are a subset of the JSON keys.
 Each entry lists the keys of the objects it prints.
 
 **`search <query>`** — one object per matching file:
-`user`, `path`, `size`, `bitrate`, `duration`, `free_slot`, `slots`, `speed`.
+`user`, `path`, `size`, `bitrate`, `sample_rate`, `bit_depth`, `duration`, `free_slot`, `slots`, `speed`.
 Filters: `--min-bitrate <kbps>`, `--free-slots`, `--exclude <term>` (repeatable),
 `--extension <ext>` (repeatable, dot optional), `--min-size <bytes>`,
 `--max-size <bytes>`. Also `-n/--limit` (0 means all) and
@@ -115,9 +115,9 @@ useful against a daemon, since a one-shot `download` ends with its own run.
 
 **`get <query>`** — search, pick, and download in one step. `--pick
 best|first|all`, `-n/--limit`, plus every filter `search` accepts. Use it when
-any copy will do. It ranks on free slot, bitrate and peer speed, so it cannot
-tell a remix from its original: for a named track or version, search and choose
-yourself.
+any copy will do. It ranks on lossless format, bit depth, sample rate, and
+bitrate, so it cannot tell a remix from its original: for a named track or
+version, search and choose yourself.
 
 **`wish list`** — one object per standing search: `query`.
 **`wish add <query>`** and **`wish remove <query>`** — change the wishlist in
@@ -346,8 +346,8 @@ line is enough ("you're not sharing anything, which gets you blocked; point
 ### Search, narrow, then judge
 
 For a named tracklist, always look at the candidates. **Do not use `get`.** It
-ranks on free slot, bitrate and peer speed, which are facts about the transfer
-and say nothing about whether the file is the track that was asked for. On a
+ranks on lossless format, bit depth, sample rate, and bitrate, which say nothing
+about whether the file is the track that was asked for. On a
 setlist full of remixes, edits and white labels it does not miss, it *succeeds
 with the wrong file*: exit 0, a file on disk, and nobody finds out until they
 listen. A miss you can retry; a confident wrong answer you cannot.

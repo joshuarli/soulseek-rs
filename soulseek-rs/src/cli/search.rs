@@ -25,7 +25,7 @@ pub const SORT: OptionSpec = with_default(
         "sort",
         "SORT",
         ValueKind::Choice(SortKey::CHOICES),
-        "Result order",
+        "Result order; best prefers lossless, then bit depth, sample rate, bitrate",
     ),
     "best",
 );

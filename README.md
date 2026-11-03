@@ -176,7 +176,7 @@ Everything else is a one-shot command that runs headless.
 ### The TUI
 
 Results run across the top, each file name in a column of its own with the
-folder it came from beside it; Searches, Downloads and Info share the row
+folder it came from beside it; Searches and Downloads share the row
 underneath. `Tab`/`Shift-Tab` or `1`–`3` move the focus between panes, `z`
 zooms the focused pane to the whole window, `w` hides it so the others widen
 (its number brings it back), and `W` puts the whole layout back. Every list
@@ -437,7 +437,7 @@ the message field empty. `serve`'s `status` is `queued`, `uploading`,
 
 | Command            | Extra fields                                                                                                                    |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `search`           | `duration`, `slots`, `speed`, `free_slot`                                                                                       |
+| `search`           | `sample_rate`, `bit_depth`, `duration`, `slots`, `speed`, `free_slot`                                                           |
 | `browse`           | `directory`, `bitrate`, `duration`                                                                                                                     |
 | `download` / `get` | `user`, remote `path`, `size`, beside the local `file`                                                                          |
 | `whoami`           | `listening`, `listen_port`, `download_dir`, `privilege_seconds`                                                                 |
