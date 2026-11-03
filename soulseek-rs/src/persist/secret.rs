@@ -45,7 +45,7 @@ struct Credentials {
 
 impl FileStore {
     #[cfg(test)]
-    fn at(path: PathBuf) -> Self {
+    const fn at(path: PathBuf) -> Self {
         Self {
             path: Some(path),
             lock: Mutex::new(()),
