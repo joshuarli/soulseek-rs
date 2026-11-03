@@ -1,4 +1,3 @@
-mod downloads;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
 pub mod login;
@@ -9,7 +8,6 @@ mod styles;
 pub mod tui;
 mod utils;
 
-pub use downloads::render_download_stats;
 pub use main_tui::{MainTui, launch_main_tui};
 pub use paging::*;
 pub use styles::*;

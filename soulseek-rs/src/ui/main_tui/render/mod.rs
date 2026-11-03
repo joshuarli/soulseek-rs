@@ -3,14 +3,13 @@ mod shortcuts;
 use super::MainTui;
 use crate::models::{CommandBarMode, FocusedPane, PaneLayout, RoomsView};
 use crate::ui::panes::{
-    InfoSubject, ResultsPaneParams, render_browse_pane, render_chat_pane,
-    render_download_info_pane, render_downloads_pane, render_results_pane,
-    render_rooms_pane, render_searches_pane, selected_transfer,
+    ResultsPaneParams, render_browse_pane, render_chat_pane,
+    render_downloads_pane, render_results_pane, render_rooms_pane,
+    render_searches_pane,
 };
 use crate::ui::{
     GLYPH_CURSOR, accent_style, body_style, dimmed_style, info_style, mask,
-    pack_shortcuts, pane_block, plain_title, primary_style,
-    render_download_stats, warning_style,
+    pack_shortcuts, pane_block, plain_title, primary_style, warning_style,
 };
 use crate::ui::tui::{
     Frame,
@@ -23,48 +22,34 @@ impl MainTui {
     /// Draw the whole window.
     pub fn render(&mut self, frame: &mut Frame) {
         let shortcuts = self.shortcut_rows(frame.area().width);
-        let mut constraints = vec![
-            Constraint::Length(3), // Status bar
-            Constraint::Fill(1),   // Main content
-        ];
+        let mut constraints = vec![Constraint::Fill(1)]; // Main content
         if self.state.command_bar_active {
             constraints.push(Constraint::Length(3)); // Command bar
         }
         constraints.push(Constraint::Length(shortcuts.len() as u16 + 2));
         let main_chunks = Layout::vertical(constraints).split(frame.area());
 
-        let daemon = self.client.daemon_endpoint();
-        render_download_stats(
-            frame,
-            main_chunks[0],
-            &self.state.downloads,
-            self.state.active_downloads_count,
-            daemon.as_deref(),
-            self.listener_fallback,
-        );
-
-        self.render_content(frame, main_chunks[1]);
+        self.render_content(frame, main_chunks[0]);
 
         // Render command bar if active (vim-style, above shortcuts)
         if self.state.command_bar_active {
-            self.render_command_bar(frame, main_chunks[2]);
-            self.render_shortcuts(frame, main_chunks[3], shortcuts);
-        } else {
+            self.render_command_bar(frame, main_chunks[1]);
             self.render_shortcuts(frame, main_chunks[2], shortcuts);
+        } else {
+            self.render_shortcuts(frame, main_chunks[1], shortcuts);
         }
 
         self.render_overlays(frame);
     }
 
     /// Results across the top, where a long file name has the whole width;
-    /// Searches, Downloads and Info in a row underneath. A hidden pane drops
-    /// out of its row and the rest widen; a zoomed one has the area alone.
+    /// Searches and Downloads in a row underneath. A hidden pane drops out of
+    /// its row and the rest widen; a zoomed one has the area alone.
     fn render_content(&mut self, frame: &mut Frame, area: Rect) {
         // Only what is drawn can be clicked.
         self.state.searches_pane_area = None;
         self.state.results_pane_area = None;
         self.state.downloads_pane_area = None;
-        self.state.info_pane_area = None;
         self.state.hsplit_divider = None;
         self.state.vsplit_dividers.clear();
         self.state.row_area = None;
@@ -75,24 +60,24 @@ impl MainTui {
         }
         self.state.content_area = Some(area);
 
-        // Transfers carry the most columns, so they get the most width.
-        let row_panes: Vec<(FocusedPane, u16)> =
-            [(FocusedPane::Searches, 5), (FocusedPane::Downloads, 10)]
+        let row_panes: Vec<FocusedPane> =
+            [FocusedPane::Searches, FocusedPane::Downloads]
                 .into_iter()
-                .filter(|(pane, _)| self.state.layout.is_visible(*pane))
+                .filter(|pane| self.state.layout.is_visible(*pane))
                 .collect();
 
-        let row_area = if self.state.layout.is_visible(FocusedPane::Results) {
-            // With only Info left in the row, the results deserve more of
-            // the height.
-            let row_weight = if row_panes.is_empty() { 1 } else { 2 };
+        let row_area = if !self.state.layout.is_visible(FocusedPane::Results) {
+            area
+        } else if row_panes.is_empty() {
+            self.render_pane(frame, area, FocusedPane::Results);
+            return;
+        } else {
             let top = match self.state.layout.top_height {
                 Some(rows) => Constraint::Length(shrink(rows, area.height)),
                 None => Constraint::Fill(3),
             };
             let [top, bottom] =
-                Layout::vertical([top, Constraint::Fill(row_weight)])
-                    .areas(area);
+                Layout::vertical([top, Constraint::Fill(2)]).areas(area);
             // The two touching border rows between the halves; either can
             // be dragged.
             self.state.hsplit_divider = Some(Rect::new(
@@ -103,45 +88,43 @@ impl MainTui {
             ));
             self.render_pane(frame, top, FocusedPane::Results);
             bottom
-        } else {
-            area
         };
         self.state.row_area = Some(row_area);
 
-        let mut constraints: Vec<Constraint> = row_panes
-            .iter()
-            .map(|(pane, weight)| {
-                let dragged = match *pane {
-                    FocusedPane::Searches => self.state.layout.searches_width,
-                    FocusedPane::Downloads => self.state.layout.downloads_width,
-                    FocusedPane::Results => None,
-                };
-                match dragged {
+        let constraints = if row_panes.len() == 1 {
+            vec![Constraint::Fill(1)]
+        } else {
+            // Downloads takes the width the Info pane used to occupy:
+            // Searches keeps its default share and transfers get the rest.
+            vec![
+                match self.state.layout.searches_width {
                     Some(cols) => {
                         Constraint::Length(shrink(cols, row_area.width))
                     }
-                    None => Constraint::Fill(*weight),
-                }
-            })
-            .collect();
-        constraints.push(Constraint::Fill(6)); // Info
+                    None => Constraint::Fill(5),
+                },
+                Constraint::Fill(16),
+            ]
+        };
         let chunks = Layout::horizontal(constraints).split(row_area);
-        for (chunk, (pane, _)) in chunks.iter().zip(&row_panes) {
-            // The seam at this pane's right edge: its border column and the
-            // next pane's, both draggable.
-            self.state.vsplit_dividers.push((
-                *pane,
-                Rect::new(
-                    chunk.x.saturating_add(chunk.width).saturating_sub(1),
-                    row_area.y,
-                    2,
-                    row_area.height,
-                ),
-            ));
+        for (index, (chunk, pane)) in
+            chunks.iter().zip(&row_panes).enumerate()
+        {
+            if index + 1 < row_panes.len() {
+                // The seam at this pane's right edge: its border column and
+                // the next pane's, both draggable.
+                self.state.vsplit_dividers.push((
+                    *pane,
+                    Rect::new(
+                        chunk.x.saturating_add(chunk.width).saturating_sub(1),
+                        row_area.y,
+                        2,
+                        row_area.height,
+                    ),
+                ));
+            }
             self.render_pane(frame, *chunk, *pane);
         }
-        self.state.info_pane_area = Some(chunks[row_panes.len()]);
-        self.render_info_pane(frame, chunks[row_panes.len()]);
     }
 
     fn render_pane(
@@ -224,28 +207,6 @@ impl MainTui {
         );
     }
 
-    /// The Info pane follows the focus: the highlighted result, or the
-    /// highlighted transfer.
-    fn render_info_pane(&self, frame: &mut Frame, area: Rect) {
-        let selected = if self.state.focused_pane == FocusedPane::Results {
-            self.highlighted_result().map(InfoSubject::Result)
-        } else {
-            selected_transfer(
-                self.state.downloads_table_state.selected(),
-                &self.state.downloads,
-                &self.state.uploads,
-            )
-        };
-        render_download_info_pane(
-            frame,
-            area,
-            selected,
-            matches!(
-                self.state.focused_pane,
-                FocusedPane::Results | FocusedPane::Downloads
-            ),
-        );
-    }
     fn render_overlays(&mut self, frame: &mut Frame) {
         // Messages inbox overlays everything when open.
         if self.state.show_messages {

@@ -3,7 +3,7 @@ use super::render::{MIN_PANE, shrink};
 use crate::models::{CommandBarMode, FocusedPane, LogView, PaneLayout};
 use crate::ui::page_of;
 use crate::ui::panes::{
-    InfoSubject, name_end_offset, query_end_offset, selected_transfer,
+    Selection, name_end_offset, query_end_offset, selected_transfer,
     transfer_name_end_offset, upload_display_name,
 };
 use crate::ui::tui::event::{
@@ -541,13 +541,13 @@ impl MainTui {
                     &self.state.downloads,
                     &self.state.uploads,
                 ) {
-                    Some(InfoSubject::Download(entry)) => {
+                    Some(Selection::Download(entry)) => {
                         entry.download.filename.as_str()
                     }
-                    Some(InfoSubject::Upload(upload)) => {
+                    Some(Selection::Upload(upload)) => {
                         upload_display_name(upload)
                     }
-                    Some(InfoSubject::Result(_)) | None => return 0,
+                    None => return 0,
                 };
                 transfer_name_end_offset(shown, area)
             }
@@ -643,8 +643,8 @@ impl MainTui {
         self.state
             .vsplit_dividers
             .iter()
-            .find(|(_, rect)| rect.contains(at))
-            .map(|(pane, _)| ResizeDrag::Columns(*pane))
+            .any(|(_, rect)| rect.contains(at))
+            .then_some(ResizeDrag::Columns)
     }
 
     /// Move the divider under the pointer to where the pointer is, keeping
@@ -661,40 +661,16 @@ impl MainTui {
                 self.state.layout.top_height =
                     Some(shrink(height, area.height));
             }
-            ResizeDrag::Columns(pane) => {
+            ResizeDrag::Columns => {
                 let Some(row) = self.state.row_area else {
                     return;
                 };
-                let left = if pane == FocusedPane::Downloads
-                    && self.state.layout.is_visible(FocusedPane::Searches)
-                {
-                    // Downloads starts where Searches ends.
-                    self.state
-                        .searches_pane_area
-                        .map_or(row.x, |area| area.x.saturating_add(area.width))
-                } else {
-                    row.x
-                };
-                let width = at.x.saturating_sub(left).saturating_add(1);
-                // Info shares the row, so the drag may not crowd it (and any
-                // other visible pane) out of `MIN_PANE` cells.
-                let others = MIN_PANE
-                    * u16::from(
-                        self.state.layout.is_visible(FocusedPane::Searches)
-                            && pane == FocusedPane::Downloads,
-                    )
-                    + MIN_PANE;
-                let max = row.width.saturating_sub(others).max(MIN_PANE);
-                let width = width.max(MIN_PANE).min(max);
-                match pane {
-                    FocusedPane::Searches => {
-                        self.state.layout.searches_width = Some(width);
-                    }
-                    FocusedPane::Downloads => {
-                        self.state.layout.downloads_width = Some(width);
-                    }
-                    FocusedPane::Results => {}
-                }
+                let width =
+                    at.x.saturating_sub(row.x).saturating_add(1);
+                let max =
+                    row.width.saturating_sub(MIN_PANE).max(MIN_PANE);
+                self.state.layout.searches_width =
+                    Some(width.max(MIN_PANE).min(max));
             }
         }
     }
@@ -705,9 +681,9 @@ impl MainTui {
 pub(super) enum ResizeDrag {
     /// The border between Results and the row underneath: sets that row's height.
     Rows,
-    /// The seam at the right of the named row pane: gives it that width and
-    /// takes it from the panes to its right.
-    Columns(FocusedPane),
+    /// The seam between Searches and Downloads: sets the former's width and
+    /// gives the rest to the latter.
+    Columns,
 }
 
 /// What a key did to a filter being typed.

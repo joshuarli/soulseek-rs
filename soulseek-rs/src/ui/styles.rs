@@ -9,7 +9,6 @@ use soulseek_rs::DownloadStatus;
 /// border. Vertical rows stay unpadded — they are too scarce in a terminal.
 pub const PANE_PADDING: Padding = Padding::horizontal(1);
 
-pub const VINYL_2: Color = Color::Rgb(0x26, 0x21, 0x1D);
 /// A warm oxide wash for the cursor row — dark enough that every column keeps
 /// its own colour on top of it.
 pub const SELECTION: Color = Color::Rgb(0x30, 0x1B, 0x14);
@@ -235,29 +234,6 @@ pub fn pack_shortcuts(
     rows
 }
 
-pub fn format_progress_bar(
-    progress: f64,
-    width: usize,
-    percentage: u8,
-) -> Line<'static> {
-    let filled = (progress * width as f64) as usize;
-    let empty = width.saturating_sub(filled);
-
-    let spans = vec![
-        Span::styled("[", dimmed_style()),
-        Span::styled("█".repeat(filled), Style::default().fg(SIGNAL)),
-        Span::styled("░".repeat(empty), Style::default().fg(VINYL_2)),
-        Span::styled("]", dimmed_style()),
-        Span::raw(" "),
-        Span::styled(
-            format!("{percentage}%"),
-            primary_style().add_modifier(Modifier::BOLD),
-        ),
-    ];
-
-    Line::from(spans)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,8 +262,8 @@ mod tests {
             text.starts_with(' ') && text.ends_with(' ')
         };
         assert!(inset(&pane_title("2", "Results", true)));
-        assert!(inset(&pane_title("Info", "", true)));
-        assert!(inset(&plain_title("Status", false)));
+        assert!(inset(&pane_title("3", "Downloads", true)));
+        assert!(inset(&plain_title("Keys", false)));
     }
 
     #[test]
@@ -350,13 +326,5 @@ mod tests {
         let rows = pack_shortcuts(&keys, 12);
         assert_eq!(rows.len(), SHORTCUT_ROWS_MAX);
         assert_eq!(texts(&rows)[0], "[k → act]");
-    }
-
-    #[test]
-    fn progress_bar_splits_fill_and_track() {
-        let bar = format_progress_bar(0.25, 20, 25);
-        assert_eq!(bar.spans[1].content.chars().count(), 5);
-        assert_eq!(bar.spans[1].style.fg, Some(SIGNAL));
-        assert_eq!(bar.spans[2].content.chars().count(), 15);
     }
 }

@@ -60,11 +60,10 @@ pub struct PaneLayout {
     /// Cell height dragged onto the divider between Results and the row
     /// underneath. `None` keeps the default proportions.
     pub top_height: Option<u16>,
-    /// Cell widths dragged onto the dividers in the bottom row. `None` keeps
-    /// the default proportions; Info, which has no divider of its own, takes
-    /// whatever the row has left over.
+    /// Cell width dragged onto the divider between Searches and Downloads.
+    /// `None` keeps the default proportions; Downloads takes the rest of the
+    /// row.
     pub searches_width: Option<u16>,
-    pub downloads_width: Option<u16>,
 }
 
 impl PaneLayout {
@@ -285,7 +284,6 @@ pub struct AppState {
         Option<Receiver<(Download, Receiver<DownloadStatus>)>>,
     pub downloads_sender_channel:
         Option<Sender<(Download, Receiver<DownloadStatus>)>>,
-    pub active_downloads_count: usize,
 
     // UI State
     pub focused_pane: FocusedPane,
@@ -344,7 +342,6 @@ pub struct AppState {
     /// recorded at each draw so a divider drag maps to cells.
     pub content_area: Option<Rect>,
     pub row_area: Option<Rect>,
-    pub info_pane_area: Option<Rect>,
     /// The border rows a mouse can grab to resize: the one Results sits on
     /// and the seam at the right of each row pane.
     pub hsplit_divider: Option<Rect>,
@@ -386,7 +383,6 @@ impl AppState {
             downloads_name_offset: 0,
             downloads_receiver_channel: None,
             downloads_sender_channel: None,
-            active_downloads_count: 0,
 
             focused_pane: FocusedPane::Searches,
             layout: PaneLayout::default(),
@@ -426,7 +422,6 @@ impl AppState {
             downloads_pane_area: None,
             content_area: None,
             row_area: None,
-            info_pane_area: None,
             hsplit_divider: None,
             vsplit_dividers: Vec::new(),
             popup_area: None,

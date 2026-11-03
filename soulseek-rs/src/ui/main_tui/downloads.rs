@@ -1,7 +1,7 @@
 use super::MainTui;
 use crate::directories::download_dir_for;
 use crate::models::{DownloadEntry, FileDisplayData};
-use crate::ui::panes::{InfoSubject, selected_transfer};
+use crate::ui::panes::{Selection, selected_transfer};
 use soulseek_rs::types::UploadStatus;
 use soulseek_rs::{DownloadStatus, types::Download};
 use std::{sync::mpsc, thread};
@@ -244,11 +244,11 @@ impl MainTui {
             &self.state.downloads,
             &self.state.uploads,
         ) {
-            Some(InfoSubject::Download(entry)) => {
+            Some(Selection::Download(entry)) => {
                 Some(entry.download.username.clone())
             }
-            Some(InfoSubject::Upload(upload)) => Some(upload.username.clone()),
-            Some(InfoSubject::Result(_)) | None => None,
+            Some(Selection::Upload(upload)) => Some(upload.username.clone()),
+            None => None,
         }
     }
 
@@ -259,7 +259,7 @@ impl MainTui {
             &self.state.uploads,
         );
         match selected {
-            Some(InfoSubject::Download(entry))
+            Some(Selection::Download(entry))
                 if !entry.download.is_finished() =>
             {
                 let download = &entry.download;
@@ -274,7 +274,7 @@ impl MainTui {
                     );
                 }
             }
-            Some(InfoSubject::Upload(upload))
+            Some(Selection::Upload(upload))
                 if upload.status == UploadStatus::InProgress =>
             {
                 let cancelled = self
@@ -319,19 +319,11 @@ impl MainTui {
 
         self.sync_downloads_with_session();
 
-        self.state.active_downloads_count = 0;
         for download_entry in &mut self.state.downloads {
             if let Some(ref receiver) = download_entry.receiver {
                 while let Ok(status) = receiver.try_recv() {
                     download_entry.download.status = status;
                 }
-            }
-
-            if matches!(
-                download_entry.download.status,
-                DownloadStatus::InProgress { .. }
-            ) {
-                self.state.active_downloads_count += 1;
             }
         }
     }

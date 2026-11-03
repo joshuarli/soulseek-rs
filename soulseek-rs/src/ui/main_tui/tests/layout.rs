@@ -13,25 +13,16 @@ fn the_results_pane_has_the_whole_width_to_itself() {
     assert!(results.trim_end().ends_with('╮'), "{results}");
     assert!(!results.contains("[1]"), "nothing beside it: {results}");
 
-    // The other three share the row underneath, in this order.
+    // The other two share the row underneath, in this order.
     let row = row_with(&screen, "[1] Searches");
     let searches = row.find("[1]").expect("searches");
     let downloads = row.find("[3]").expect("downloads");
-    let info = row.find("[Info]").expect("info");
-    assert!(searches < downloads && downloads < info, "{row}");
-}
+    assert!(searches < downloads, "{row}");
 
-#[test]
-fn a_listener_that_fell_back_says_so_in_the_status_bar() {
-    let mut tui = furnished_tui();
-    tui.listener_fallback = Some((2234, 50123));
-
-    let screen = screen_of(&mut tui);
-
-    assert!(
-        screen.contains("port 2234 in use, listening on 50123"),
-        "{screen}"
-    );
+    // Downloads reaches the right edge; there is no pane after it.
+    let row = tui.state.row_area.expect("laid out");
+    let downloads = tui.state.downloads_pane_area.expect("laid out");
+    assert_eq!(downloads.x + downloads.width, row.x + row.width);
 }
 
 #[test]
@@ -78,16 +69,12 @@ fn hiding_the_results_gives_the_row_the_whole_height() {
     press(&mut tui, KeyCode::Char('w'));
     let screen = screen_of(&mut tui);
     assert!(!screen.contains("[2] Results"), "{screen}");
-    // The row now starts right under the status bar.
-    let status = screen
-        .lines()
-        .position(|line| line.contains("Status"))
-        .expect("status bar");
+    // The row now starts at the top of the window.
     let row = screen
         .lines()
         .position(|line| line.contains("[1] Searches"))
         .expect("searches");
-    assert_eq!(row, status + 3, "{screen}");
+    assert!(row <= 1, "{screen}");
 }
 
 #[test]
@@ -113,7 +100,6 @@ fn z_zooms_the_focused_pane_and_esc_or_z_leaves_it() {
     assert!(screen.contains("[2] Results"), "{screen}");
     assert!(!screen.contains("[1] Searches"), "{screen}");
     assert!(!screen.contains("[3] Downloads"), "{screen}");
-    assert!(!screen.contains("[Info]"), "{screen}");
     assert!(screen.contains("[z → unzoom]"), "{screen}");
 
     // Tab while zoomed switches which pane fills the window.
@@ -126,7 +112,6 @@ fn z_zooms_the_focused_pane_and_esc_or_z_leaves_it() {
     assert!(!tui.state.layout.zoomed);
     let screen = screen_of(&mut tui);
     assert!(screen.contains("[2] Results"), "{screen}");
-    assert!(screen.contains("[Info]"), "{screen}");
 
     press(&mut tui, KeyCode::Char('z'));
     press(&mut tui, KeyCode::Char('z'));
@@ -362,13 +347,17 @@ fn dragging_a_row_panes_right_edge_gives_it_width() {
     assert_eq!(tui.state.layout.searches_width, Some(searches.width + 4));
     assert_eq!(tui.state.focused_pane, FocusedPane::Downloads);
 
-    // The widths are applied, and Info narrows to whatever is left.
+    // The widths are applied, and Downloads takes whatever is left.
     let _ = screen_of(&mut tui);
+    let row = tui.state.row_area.expect("laid out");
     assert_eq!(
         tui.state.searches_pane_area.expect("laid out").width,
         searches.width + 4
     );
-    assert!(tui.state.info_pane_area.expect("laid out").width >= 3);
+    assert_eq!(
+        tui.state.downloads_pane_area.expect("laid out").width,
+        row.width - (searches.width + 4)
+    );
 
     // Releasing the button ends the drag: later motions just move the
     // pointer.
@@ -379,21 +368,4 @@ fn dragging_a_row_panes_right_edge_gives_it_width() {
         searches.y + 1,
     );
     assert_eq!(tui.state.layout.searches_width, Some(searches.width + 4));
-}
-
-#[test]
-fn the_info_pane_describes_the_highlighted_result() {
-    let mut tui = results_tui(3);
-    tui.state.results_items[1].filename =
-        "@@x\\Music\\Album\\Second Track.mp3".to_string();
-    tui.state.results_items[1].bitrate = Some(320);
-    tui.state.results_table_state.select(Some(1));
-
-    let screen = screen_of(&mut tui);
-    assert!(screen.contains("@@x/Music/Album"), "{screen}");
-    assert!(screen.contains("Bitrate"), "{screen}");
-
-    tui.state.focused_pane = FocusedPane::Downloads;
-    let screen = screen_of(&mut tui);
-    assert!(!screen.contains("@@x/Music/Album"), "{screen}");
 }

@@ -557,10 +557,6 @@ fn run_default_tui(
         let store = crate::persist::paths::state_dir()
             .map(crate::persist::state::StateStore::new);
 
-        let listener_fallback = bound_port
-            .filter(|&bound| listen_port != 0 && bound != listen_port)
-            .map(|bound| (listen_port, bound));
-
         let exit = launch_main_tui(
             terminal,
             Arc::new(outcome.client),
@@ -569,7 +565,6 @@ fn run_default_tui(
             Duration::from_secs(resolved.search_timeout),
             store,
             config_path.clone(),
-            listener_fallback,
         )
         .map_err(|e| CliError::new(Exit::Failure, e.to_string()))?;
 
@@ -646,7 +641,6 @@ fn run_attached_tui(
         Duration::from_secs(resolved.search_timeout),
         None,
         config_path,
-        None,
     )
     .map(|_| ())
     .map_err(|e| CliError::new(Exit::Failure, e.to_string()))
