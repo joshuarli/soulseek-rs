@@ -17,7 +17,6 @@ small ones land fastest.
 Before you push:
 
 ```bash
-cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test
 ```

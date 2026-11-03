@@ -723,7 +723,6 @@ That is a Soulseek limitation, not a bug.
 RUST_LOG=trace cargo run   # run with debug and trace output
 cargo test
 cargo clippy
-cargo fmt
 ```
 
 ### End-to-end tests
@@ -762,8 +761,7 @@ soulfind instead of skipping.
 
 `.github/workflows/ci.yml` runs on every push and pull request:
 
-- **Format & Clippy**: `cargo fmt --all --check` and
-  `cargo clippy --workspace --all-targets -- -D warnings`.
+- **Clippy**: `cargo clippy --workspace --all-targets -- -D warnings`.
 - **Test**: `cargo test --verbose` on Linux and macOS.
 - **End-to-end**: builds soulfind from source (LDC + `dub build :server`),
   points `SOULFIND_BIN` at it, and runs all four e2e suites with

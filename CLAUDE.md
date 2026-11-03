@@ -37,7 +37,6 @@ release PR. Subjects are [conventional commits](https://www.conventionalcommits.
 ## Before you push
 
 ```bash
-cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test
 ```
