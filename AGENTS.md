@@ -30,9 +30,9 @@ git config user.name "Your Name" && git config user.email "you@example.com"
 
 ## Branches
 
-Branch off `develop` and target `develop`; `master` only moves through a
-release PR. Subjects are [conventional commits](https://www.conventionalcommits.org)
-— release-plz reads them to pick the version and write the changelog.
+Branch off `main` and target `main`. Releases are cut by dispatching the
+`release` workflow on `main`; it publishes a `release-<sha>` prerelease.
+Subjects are [conventional commits](https://www.conventionalcommits.org).
 
 ## Before you push
 

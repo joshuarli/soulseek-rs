@@ -770,7 +770,7 @@ soulfind instead of skipping.
 
 ## Contributing
 
-Issues and pull requests both welcome. Branch off `develop`, keep the change
+Issues and pull requests both welcome. Branch off `main`, keep the change
 small, and see [CONTRIBUTING.md](./CONTRIBUTING.md) for the commit convention
 and the checks CI runs.
 
