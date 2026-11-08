@@ -42,7 +42,6 @@ soulseek-rs-lib = { version = "19.1.0", path = "../soulseek-rs-lib" }
 lexopt = "0.3"
 kasuari = "0.4.12"
 unicode-width = "0.2"
-dotenv = "0.15.0"
 deser = { version = "0.10.2", features = ["derive"] }
 deser-json = "0.10.2"
 deser-toml = "0.10.2"

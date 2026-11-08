@@ -4,6 +4,5 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    dotenv::dotenv().ok();
     soulseek_rs_tui::run::run(std::env::args_os())
 }
