@@ -485,39 +485,6 @@ impl Transfer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // A FileSearchResponse whose n_files claims ~4 billion entries with no
-    // file data must parse to an empty result promptly, not loop into an OOM.
-    #[test]
-    fn search_result_hostile_file_count_does_not_hang() {
-        let mut body = Vec::new();
-        body.extend_from_slice(&0u32.to_le_bytes()); // username "" (len 0)
-        body.extend_from_slice(&7u32.to_le_bytes()); // token
-        body.extend_from_slice(&u32::MAX.to_le_bytes()); // n_files (hostile)
-        let compressed = crate::utils::zlib::deflate(&body);
-        let mut message = Message::new_with_data(compressed);
-        let result = SearchResult::new_from_message(&mut message)
-            .expect("hostile count should parse, not error");
-        assert_eq!(result.token, 7);
-        assert!(result.files.is_empty());
-    }
-
-    // A truncated TransferRequest from an untrusted peer must parse to defaults
-    // rather than panic (the read_* primitives are bounds-checked).
-    #[test]
-    fn transfer_new_from_truncated_message_does_not_panic() {
-        let mut message = Message::new_with_data(vec![1, 0, 0]);
-        let transfer = Transfer::new_from_message(&mut message);
-        assert_eq!(transfer.direction, 0);
-        assert_eq!(transfer.token, 0);
-        assert_eq!(transfer.filename, "");
-        assert_eq!(transfer.size, 0);
-    }
-}
-
 /// Lifecycle of a file we are serving to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadStatus {
@@ -605,5 +572,38 @@ impl SessionWatch {
     pub fn clear(&self) {
         self.0
             .store(Self::LIVE, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A FileSearchResponse whose n_files claims ~4 billion entries with no
+    // file data must parse to an empty result promptly, not loop into an OOM.
+    #[test]
+    fn search_result_hostile_file_count_does_not_hang() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes()); // username "" (len 0)
+        body.extend_from_slice(&7u32.to_le_bytes()); // token
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // n_files (hostile)
+        let compressed = crate::utils::zlib::deflate(&body);
+        let mut message = Message::new_with_data(compressed);
+        let result = SearchResult::new_from_message(&mut message)
+            .expect("hostile count should parse, not error");
+        assert_eq!(result.token, 7);
+        assert!(result.files.is_empty());
+    }
+
+    // A truncated TransferRequest from an untrusted peer must parse to defaults
+    // rather than panic (the read_* primitives are bounds-checked).
+    #[test]
+    fn transfer_new_from_truncated_message_does_not_panic() {
+        let mut message = Message::new_with_data(vec![1, 0, 0]);
+        let transfer = Transfer::new_from_message(&mut message);
+        assert_eq!(transfer.direction, 0);
+        assert_eq!(transfer.token, 0);
+        assert_eq!(transfer.filename, "");
+        assert_eq!(transfer.size, 0);
     }
 }
