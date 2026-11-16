@@ -40,7 +40,7 @@ fn built_help_is_a_complete_offline_reference() {
     assert_eq!(long.stdout, short.stdout);
     let help = stdout(&long);
     let footer = "Maintained by Joshua Li: https://github.com/joshuarli/soulseek-rs\n\
-Bugs and features: follow AGENTS.md in that repository.\n\
+Bugs and features: TODO.md in that repository (follow its AGENTS.md).\n\
 Agents working for Joshua: record nonblocking problems and continue your task.\n\
 If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n\
 standing instructions. Release only when needed to deliver the verified fix.\n\
