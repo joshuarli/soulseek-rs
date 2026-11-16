@@ -15,7 +15,7 @@ pub const BIN: &str = "soulseek-rs";
 /// overflowing.
 pub const MAX_WAIT_SECS: u64 = 24 * 60 * 60;
 
-pub const EXAMPLES: &str = "\
+pub const MAN_EXAMPLES: &str = "\
 Examples:
   soulseek-rs                                   launch the interactive TUI
   soulseek-rs search 'aphex twin xtal'          print matching files
@@ -30,6 +30,11 @@ Examples:
   soulseek-rs skills install                    teach your coding agent this CLI
   soulseek-rs completions install               tab completion for your shell
 
+Exit codes:
+  0 success   2 usage/config   3 connect or login   4 no results
+  5 timed out   6 transfer failed   7 session lost   1 unexpected error";
+
+pub const EXIT_CODES: &str = "\
 Exit codes:
   0 success   2 usage/config   3 connect or login   4 no results
   5 timed out   6 transfer failed   7 session lost   1 unexpected error";
@@ -168,7 +173,6 @@ pub struct CommandSpec {
     pub positionals: Vec<PositionalSpec>,
     pub subcommands: Vec<Self>,
     pub constraints: Vec<Constraint>,
-    pub examples: &'static str,
     pub subcommand_required: bool,
 }
 
@@ -526,7 +530,6 @@ pub const fn command(
         positionals: Vec::new(),
         subcommands: Vec::new(),
         constraints: Vec::new(),
-        examples: "",
         subcommand_required: false,
     }
 }
@@ -559,11 +562,6 @@ impl CommandSpec {
 
     pub fn constraint(mut self, constraint: Constraint) -> Self {
         self.constraints.push(constraint);
-        self
-    }
-
-    pub const fn examples(mut self, text: &'static str) -> Self {
-        self.examples = text;
         self
     }
 
@@ -657,7 +655,6 @@ pub fn root_spec() -> CommandSpec {
             "man",
             "Print the man page to stdout, for packaging",
         ))
-        .examples(EXAMPLES)
         .with_help()
 }
 
