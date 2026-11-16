@@ -49,6 +49,11 @@ soulseek-rs search "rjd2" --json \
   | soulseek-rs download --stdin
 ```
 
+Run `soulseek-rs --help` for the complete command reference, including nested
+commands, their arguments and options, and an example for each. Command-specific
+help is also available, for example `soulseek-rs room listen --help`. Running
+`soulseek-rs` without a command still starts the interactive TUI.
+
 Exit codes: `0` success, `2` usage or config, `3` connect or login, `4` nothing
 found, `5` timed out, `6` transfer failed, `7` session lost mid-command, `1`
 unexpected error.

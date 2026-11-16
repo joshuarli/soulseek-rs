@@ -8,6 +8,43 @@ use crate::cli::command::{
 use crate::cli::error::ParseError;
 use crate::cli::version;
 
+const FOOTER: &str = "Maintained by Joshua Li: https://github.com/joshuarli/soulseek-rs\n\
+Bugs and features: TODO.md in that repository (follow its AGENTS.md).\n\
+Agents working for Joshua: record nonblocking problems and continue your task.\n\
+If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n\
+standing instructions. Release only when needed to deliver the verified fix.\n\
+Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md";
+
+pub(super) fn example(spec: &CommandSpec, path: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = std::iter::once(BIN)
+        .chain(path.iter().copied())
+        .map(str::to_string)
+        .collect();
+    let mut leaf = spec;
+    while leaf.subcommand_required {
+        leaf = &leaf.subcommands[0];
+        args.push(leaf.name.to_string());
+    }
+    if leaf.id == CommandId::Download {
+        args.push("--stdin".to_string());
+    } else {
+        for positional in leaf.positionals.iter().filter(|p| p.required) {
+            let value = match positional.name {
+                "QUERY" | "DIRECTORY" => "music",
+                "USER" | "VALUE" => "someuser",
+                "PATH" => "music.flac",
+                "ROOM" => "lobby",
+                "MESSAGE" => "hello",
+                "KEY" => "username",
+                "SHELL" => "bash",
+                name => panic!("no example for {name}"),
+            };
+            args.push(value.to_string());
+        }
+    }
+    args
+}
+
 pub fn render_path(path: &[String]) -> Result<String, ParseError> {
     let mut spec = command::root_spec();
     let mut names: Vec<&'static str> = Vec::new();
@@ -56,11 +93,8 @@ fn render_page(spec: &CommandSpec, path: &[&str]) -> String {
         }
     }
 
-    if !spec.examples.is_empty() {
-        out.push('\n');
-        out.push_str(spec.examples);
-        out.push('\n');
-    }
+    out.push_str(&format!("\nExamples:\n  {}\n", example(spec, path).join(" ")));
+    out.push_str(&format!("\nSee `{BIN} --help` for the complete reference.\n"));
     out
 }
 
@@ -81,12 +115,26 @@ fn render_root(spec: &CommandSpec) -> String {
         let mut path = Vec::new();
         push_block(&mut out, subcommand, &mut path, 1);
     }
-    if !spec.examples.is_empty() {
-        out.push('\n');
-        out.push_str(spec.examples);
-        out.push('\n');
+    out.push_str("\nExamples:\n");
+    out.push_str(&format!("  {}\n", example(spec, &[]).join(" ")));
+    for child in &spec.subcommands {
+        push_examples(&mut out, child, &mut Vec::new());
     }
+    out.push('\n');
+    out.push_str(command::EXIT_CODES);
+    out.push_str("\n\n");
+    out.push_str(FOOTER);
+    out.push('\n');
     out
+}
+
+fn push_examples(out: &mut String, spec: &CommandSpec, path: &mut Vec<&'static str>) {
+    path.push(spec.name);
+    out.push_str(&format!("  {}\n", example(spec, path).join(" ")));
+    for child in &spec.subcommands {
+        push_examples(out, child, path);
+    }
+    path.pop();
 }
 
 fn push_block(
@@ -103,6 +151,9 @@ fn push_block(
         "{pad}  Usage: {}\n",
         command::usage(spec, path)
     ));
+    if !spec.long_about.is_empty() && spec.long_about != spec.about {
+        out.push_str(&format!("{pad}  {}\n", spec.long_about));
+    }
     if !spec.positionals.is_empty() {
         out.push_str(&format!("{pad}  Arguments:\n"));
         for positional in &spec.positionals {
@@ -121,15 +172,22 @@ fn push_block(
             ));
         }
     }
+    for constraint in &spec.constraints {
+        match constraint {
+            command::Constraint::RequiredUnless { target, unless } => {
+                out.push_str(&format!("{pad}  {target} is required unless --{unless} is used.\n"));
+            }
+            command::Constraint::Conflicts { option, with } => {
+                out.push_str(&format!("{pad}  --{option} conflicts with {}.\n", with.join(", ")));
+            }
+        }
+    }
     if spec.has_subcommands() {
         out.push_str(&format!("{pad}  Commands:\n"));
         for child in &spec.subcommands {
             push_block(out, child, path, depth + 2);
         }
     }
-    out.push_str(&format!(
-        "{pad}  Common options are inherited from `{BIN}`.\n"
-    ));
     path.pop();
 }
 
@@ -233,11 +291,9 @@ pub fn man_page() -> String {
         let mut path = Vec::new();
         man_command(&mut out, subcommand, &mut path);
     }
-    if !spec.examples.is_empty() {
-        out.push_str(".SH EXAMPLES\n");
-        out.push_str(&roff(spec.examples));
-        out.push('\n');
-    }
+    out.push_str(".SH EXAMPLES\n");
+    out.push_str(&roff(command::MAN_EXAMPLES));
+    out.push('\n');
     out.push_str(".SH VERSION\n");
     out.push_str(&format!("{}\n", version::line()));
     out

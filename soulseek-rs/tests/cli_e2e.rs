@@ -30,6 +30,42 @@ const EXIT_NO_RESULTS: i32 = 4;
 const EXIT_TRANSFER: i32 = 6;
 const EXIT_SESSION_LOST: i32 = 7;
 
+#[test]
+fn built_help_is_a_complete_offline_reference() {
+    let long = run(&["--help"]);
+    let short = run(&["-h"]);
+    assert_eq!(code(&long), 0);
+    assert_eq!(code(&short), 0);
+    assert!(long.stderr.is_empty());
+    assert_eq!(long.stdout, short.stdout);
+    let help = stdout(&long);
+    let footer = "Maintained by Joshua Li: https://github.com/joshuarli/soulseek-rs\n\
+Bugs and features: TODO.md in that repository (follow its AGENTS.md).\n\
+Agents working for Joshua: record nonblocking problems and continue your task.\n\
+If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n\
+standing instructions. Release only when needed to deliver the verified fix.\n\
+Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n";
+    assert!(help.ends_with(footer));
+    assert_eq!(help.matches("Maintained by Joshua Li:").count(), 1);
+    assert!(help.contains("\nExamples:\n"));
+    let mut paths = 0;
+    for line in help.lines().filter_map(|line| line.trim().strip_prefix("Usage: soulseek-rs ")) {
+        let Some((path, _)) = line.split_once(" [OPTIONS]") else { continue };
+        let words: Vec<&str> = path.split_whitespace().collect();
+        if words.is_empty() || words[0] == "[OPTIONS]" { continue; }
+        for flag in ["-h", "--help"] {
+            let mut args = words.clone();
+            args.push(flag);
+            let output = run(&args);
+            assert_eq!(code(&output), 0, "{args:?}: {}", stderr(&output));
+            assert!(output.stderr.is_empty(), "{args:?}");
+            assert!(stdout(&output).contains(&format!("Usage: soulseek-rs {path} [OPTIONS]")), "{args:?}");
+        }
+        paths += 1;
+    }
+    assert!(paths > 40, "only {paths} command paths");
+}
+
 /// Build a command for the binary, isolated from the developer's environment
 /// and from the repository's own working directory.
 ///

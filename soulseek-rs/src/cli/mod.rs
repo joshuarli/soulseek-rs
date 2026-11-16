@@ -596,6 +596,36 @@ mod tests {
     }
 
     #[test]
+    fn reference_examples_parse_and_cover_every_command() {
+        let root = command::root_spec();
+        let reference = help::render_path(&[]).expect("root help");
+        let mut all = Vec::new();
+        specs(&root, &mut Vec::new(), &mut all);
+        for (spec, path) in all {
+            let args = help::example(&spec, &path);
+            let line = args.join(" ");
+            assert!(reference.contains(&format!("  {line}\n")), "{line}");
+            assert!(parse(args).is_ok(), "example failed to parse: {line}");
+            assert!(reference.contains(&command::usage(&spec, &path)));
+            assert!(reference.contains(spec.about));
+            for positional in &spec.positionals {
+                assert!(reference.contains(positional.name));
+                assert!(reference.contains(positional.help));
+            }
+            for option in &spec.options {
+                assert!(reference.contains(&format!("--{}", option.long)));
+                assert!(reference.contains(option.help));
+                if let Some(default) = option.default {
+                    assert!(reference.contains(&format!("[default: {default}]")));
+                }
+                if let Some(env) = option.env {
+                    assert!(reference.contains(&format!("[env: {env}]")));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_help_subcommand_resolves_nested_paths() {
         match parse(["soulseek-rs", "help", "room", "list"]) {
             Ok(Invocation::Help(help)) => {
