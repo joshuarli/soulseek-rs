@@ -118,16 +118,7 @@ pub fn sanitize(value: &str) -> String {
 /// name peers, rooms and files, so control characters are replaced with
 /// U+FFFD; newline and tab stay, as a message may span lines.
 fn displayable(message: &str) -> String {
-    message
-        .chars()
-        .map(|c| {
-            if c.is_control() && c != '\n' && c != '\t' {
-                '\u{FFFD}'
-            } else {
-                c
-            }
-        })
-        .collect()
+    soulseek_rs::utils::logger::displayable(message)
 }
 
 /// Where records go and whether progress is shown.
