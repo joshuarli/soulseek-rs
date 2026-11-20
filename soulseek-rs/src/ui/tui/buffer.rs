@@ -3,6 +3,7 @@
 use super::layout::{Position, Rect};
 use super::style::Style;
 use super::text::Line;
+use soulseek_rs::utils::logger::displayable_char;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,19 +43,6 @@ impl Cell {
     #[must_use]
     pub fn width(&self) -> u16 {
         u16::from(self.width)
-    }
-}
-
-/// What a cell may hold for `character`. Text here comes from peers and
-/// servers, and a cell's symbol is written to the terminal as it is, so a
-/// control character (ESC, BEL, DEL, the C1 range including the 8-bit CSI)
-/// would be executed by the terminal rather than shown. Each one is drawn
-/// as U+FFFD instead.
-fn displayable(character: char) -> char {
-    if character.is_control() {
-        '\u{FFFD}'
-    } else {
-        character
     }
 }
 
@@ -128,7 +116,7 @@ impl Buffer {
         let end = x.saturating_add(max_width).min(self.area.right());
         let mut x = x;
         let mut glyph = String::new();
-        for character in text.chars().map(displayable) {
+        for character in text.chars().map(displayable_char) {
             if glyph.is_empty() {
                 glyph.push(character);
                 continue;

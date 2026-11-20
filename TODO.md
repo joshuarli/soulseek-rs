@@ -1,13 +1,5 @@
 Prefix: SOUL
 Next: 9
-### SOUL-1 · P2 · Library logger writes peer-supplied text to stderr unescaped
-
-- **Area:** Needs owner · security · upstream logger
-- **Where:** soulseek-rs-lib/src/utils/logger.rs (log sinks); soulseek-rs-lib/src/message/peer/upload_denied.rs:16
-- **Problem:** log() formats peer-controlled strings (for example the upload-denied reason, file names, user names) into stderr lines and into the buffered lines the TUI flushes to the real terminal on exit, without removing control characters. The file is upstream code, outside this pass's diff, so it is not changed here.
-- **Recommendation:** Owner decision: allow a minimal change to the upstream logger (replace control characters other than newline in message) or carry it as a fork patch; add a test through log().
-- **Fix with:** security
-- **Effort:** S
 
 ### SOUL-2 · P3 · Make skipped server scenarios visible in CI
 

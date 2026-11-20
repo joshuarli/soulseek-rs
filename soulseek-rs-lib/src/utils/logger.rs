@@ -98,6 +98,53 @@ fn has_log_file() -> bool {
     LOG_FILE.lock().is_ok_and(|f| f.is_some())
 }
 
+/// What a terminal may be shown for `character`.
+///
+/// Text from peers and servers is written to the terminal as it is, so a
+/// control character (ESC, BEL, DEL, the C1 range including the 8-bit CSI)
+/// would be executed rather than shown. Each one is replaced with U+FFFD.
+#[must_use]
+pub fn displayable_char(character: char) -> char {
+    if character.is_control() {
+        '\u{FFFD}'
+    } else {
+        character
+    }
+}
+
+/// `message` with every control character replaced as [`displayable_char`]
+/// does, except newline and tab, as a message may span lines.
+#[must_use]
+pub fn displayable(message: &str) -> String {
+    message
+        .chars()
+        .map(|c| {
+            if c == '\n' || c == '\t' {
+                c
+            } else {
+                displayable_char(c)
+            }
+        })
+        .collect()
+}
+
+/// The file line and the terminal line for one message. The message can carry
+/// peer-supplied text (upload-denied reasons, file names, user names), and the
+/// terminal line is written to the real terminal, so control characters in it
+/// are neutralized before they can be executed.
+fn format_lines(
+    timestamp: &str,
+    name: &str,
+    colour: &str,
+    message: &str,
+) -> (String, String) {
+    let message = displayable(message);
+    (
+        format!("[{timestamp}] [{name}] {message}"),
+        format!("[{timestamp}] [{colour}{name}\x1b[0m] {message}"),
+    )
+}
+
 pub fn log(level: LogLevel, message: &str) {
     if level <= log_level() {
         {
@@ -167,28 +214,26 @@ pub fn log(level: LogLevel, message: &str) {
                 "{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}.{subsec_millis:03}"
             );
 
+            let (plain, coloured) =
+                format_lines(&timestamp, name, colour, message);
+
             match choose_sink(BUFFERING.load(Ordering::Relaxed), has_log_file())
             {
                 LogSink::File => {
                     if let Ok(mut log_file) = LOG_FILE.lock()
                         && let Some(file) = log_file.as_mut()
                     {
-                        let _ =
-                            writeln!(file, "[{timestamp}] [{name}] {message}");
+                        let _ = writeln!(file, "{plain}");
                         let _ = file.flush();
                     }
                 }
                 LogSink::Buffer => {
                     if let Ok(mut buffer) = BUFFER.lock() {
-                        buffer.push(format!(
-                            "[{timestamp}] [{colour}{name}\x1b[0m] {message}"
-                        ));
+                        buffer.push(coloured);
                     }
                 }
                 LogSink::Stderr => {
-                    eprintln!(
-                        "[{timestamp}] [{colour}{name}\x1b[0m] {message}"
-                    );
+                    eprintln!("{coloured}");
                 }
             }
         }
@@ -253,7 +298,57 @@ macro_rules! trace {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogLevel, LogSink, choose_sink, log_level, set_log_level};
+    use super::{
+        BUFFER, LogLevel, LogSink, choose_sink, enable_buffering,
+        disable_buffering, format_lines, log, log_level, set_log_level,
+    };
+
+    /// ESC, OSC, CSI, BEL, DEL and C1 (including the 8-bit CSI) in a peer
+    /// string, around text that must survive.
+    const HOSTILE: &str = "denied \x1b]0;pwned\x07 \x1b[2J \u{9b}31m \x7f \u{85} end";
+
+    fn has_control(line: &str, allowed: &[&str]) -> bool {
+        let mut rest = line.to_string();
+        for a in allowed {
+            rest = rest.replace(a, "");
+        }
+        rest.chars().any(char::is_control)
+    }
+
+    #[test]
+    fn peer_text_in_a_formatted_line_carries_no_control_characters() {
+        let (plain, coloured) =
+            format_lines("t", "WARN", "\x1b[33m", HOSTILE);
+        assert!(!has_control(&plain, &[]), "{plain:?}");
+        // The logger's own colour codes are the only escapes allowed.
+        assert!(
+            !has_control(&coloured, &["\x1b[33m", "\x1b[0m"]),
+            "{coloured:?}"
+        );
+        assert!(plain.contains("denied") && plain.ends_with("end"));
+        assert!(plain.contains("\u{FFFD}]0;pwned\u{FFFD}"), "{plain:?}");
+    }
+
+    #[test]
+    fn peer_text_buffered_for_the_tui_flush_carries_no_control_characters() {
+        let marker = "buffered-peer-text-marker";
+        let before = log_level();
+        set_log_level(LogLevel::Warn);
+        enable_buffering();
+        log(LogLevel::Warn, &format!("{marker} {HOSTILE}"));
+        disable_buffering();
+        set_log_level(before);
+
+        let buffer = BUFFER.lock().unwrap();
+        let line = buffer
+            .iter()
+            .find(|l| l.contains(marker))
+            .expect("the line was buffered");
+        assert!(
+            !has_control(line, &["\x1b[33m", "\x1b[0m"]),
+            "{line:?}"
+        );
+    }
 
     #[test]
     fn the_level_can_be_changed_while_running() {
