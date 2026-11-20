@@ -1,5 +1,5 @@
 Prefix: DSLP
-Next: 14
+Next: 17
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier E). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
@@ -79,5 +79,23 @@ Not started.
 - **Problem:** cargo test -p soulseek-rs --features fixtures --test tui_snapshots fails 4 of 5 tests at HEAD without any change of this pass (verified by restoring the previous event.rs): the recorded frames lack the Status pane the window now draws (narrow_window_still_fits expects Results at row 0, the window draws Status first), and the tiny-window test times out. The tests need the fixtures feature, so make test and CI never run them.
 - **Recommendation:** Decide whether the window or the frames are right, re-record with PTYTEST_UPDATE_SNAPSHOTS=1, and run the suite in make test (or CI) once green.
 - **Fix with:** test-pyramid
+- **Effort:** M
+
+### DSLP-15 · P3 · Stress benchmark needs a local soulfind and has no make entrypoint
+
+- **Area:** verification · bench
+- **Where:** scripts/stress.sh; benchmarks/README.md; Makefile
+- **Problem:** The only benchmark (scripts/stress.sh, a mixed-load score out of 100 against benchmarks/stress-baseline.json at 97.78) spawns a local soulfind that is not installed on this host, so neither an Edit-size nor a Change-size run could be proven. The Makefile has no bench target, and CI never runs it. The score covers the library under peer load only.
+- **Recommendation:** Where soulfind is available, add make bench running scripts/stress.sh and prove it at one Edit and one Change workload; never run the full profile in CI.
+- **Fix with:** bench-pyramid
+- **Effort:** S
+
+### DSLP-16 · P3 · No benchmark for the TUI frame path or peer message parsing
+
+- **Area:** verification · bench
+- **Where:** soulseek-rs/src/ui/tui/buffer.rs; soulseek-rs/src/ui/tui/terminal.rs; soulseek-rs-lib/src/message
+- **Problem:** Every frame redraws through Buffer::set_stringn and AnsiBackend::draw, and every peer message goes through the message readers, but no benchmark covers either; the stress score exercises only network concurrency, so a render or parse regression would not move it.
+- **Recommendation:** Add one deterministic benchmark each (a full-window draw over the fixture session with the TestBackend; parsing a captured file-search response) outside make test.
+- **Fix with:** bench-pyramid
 - **Effort:** M
 
