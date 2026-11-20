@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(missing_docs)]
 
@@ -25,8 +24,6 @@ use std::fmt;
 pub enum PortMappingProtocol {
     /// TCP protocol
     TCP,
-    /// UDP protocol
-    UDP,
 }
 
 impl fmt::Display for PortMappingProtocol {
@@ -36,7 +33,6 @@ impl fmt::Display for PortMappingProtocol {
             "{}",
             match *self {
                 PortMappingProtocol::TCP => "TCP",
-                PortMappingProtocol::UDP => "UDP",
             }
         )
     }

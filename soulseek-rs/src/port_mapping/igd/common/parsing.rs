@@ -4,11 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use xmltree::{self, Element};
 
-use super::super::errors::{
-    AddAnyPortError, AddPortError, GetExternalIpError, GetGenericPortMappingEntryError, RemovePortError, RequestError,
-    SearchError,
-};
-use super::super::PortMappingProtocol;
+use super::super::errors::{AddPortError, GetExternalIpError, RemovePortError, RequestError, SearchError};
 
 // Parse the result.
 pub fn parse_search_result(text: &str) -> Result<(SocketAddr, String), SearchError> {
@@ -261,48 +257,6 @@ pub fn parse_get_external_ip_response(result: RequestResult) -> Result<IpAddr, G
     }
 }
 
-pub fn parse_add_any_port_mapping_response(result: RequestResult) -> Result<u16, AddAnyPortError> {
-    match result {
-        Ok(resp) => {
-            match resp
-                .xml
-                .get_child("NewReservedPort")
-                .and_then(|e| e.get_text())
-                .and_then(|t| t.parse::<u16>().ok())
-            {
-                Some(port) => Ok(port),
-                None => Err(AddAnyPortError::RequestError(RequestError::InvalidResponse(resp.text))),
-            }
-        }
-        Err(err) => Err(match err {
-            RequestError::ErrorCode(605, _) => AddAnyPortError::DescriptionTooLong,
-            RequestError::ErrorCode(606, _) => AddAnyPortError::ActionNotAuthorized,
-            RequestError::ErrorCode(728, _) => AddAnyPortError::NoPortsAvailable,
-            e => AddAnyPortError::RequestError(e),
-        }),
-    }
-}
-
-pub fn convert_add_random_port_mapping_error(error: RequestError) -> Option<AddAnyPortError> {
-    match error {
-        RequestError::ErrorCode(724, _) => None,
-        RequestError::ErrorCode(605, _) => Some(AddAnyPortError::DescriptionTooLong),
-        RequestError::ErrorCode(606, _) => Some(AddAnyPortError::ActionNotAuthorized),
-        RequestError::ErrorCode(718, _) => Some(AddAnyPortError::NoPortsAvailable),
-        RequestError::ErrorCode(725, _) => Some(AddAnyPortError::OnlyPermanentLeasesSupported),
-        e => Some(AddAnyPortError::RequestError(e)),
-    }
-}
-
-pub fn convert_add_same_port_mapping_error(error: RequestError) -> AddAnyPortError {
-    match error {
-        RequestError::ErrorCode(606, _) => AddAnyPortError::ActionNotAuthorized,
-        RequestError::ErrorCode(718, _) => AddAnyPortError::ExternalPortInUse,
-        RequestError::ErrorCode(725, _) => AddAnyPortError::OnlyPermanentLeasesSupported,
-        e => AddAnyPortError::RequestError(e),
-    }
-}
-
 pub fn convert_add_port_error(err: RequestError) -> AddPortError {
     match err {
         RequestError::ErrorCode(605, _) => AddPortError::DescriptionTooLong,
@@ -323,93 +277,6 @@ pub fn parse_delete_port_mapping_response(result: RequestResult) -> Result<(), R
             e => RemovePortError::RequestError(e),
         }),
     }
-}
-
-/// One port mapping entry as returned by GetGenericPortMappingEntry
-pub struct PortMappingEntry {
-    /// The remote host for which the mapping is valid
-    /// Can be an IP address or a host name
-    pub remote_host: String,
-    /// The external port of the mapping
-    pub external_port: u16,
-    /// The protocol of the mapping
-    pub protocol: PortMappingProtocol,
-    /// The internal (local) port
-    pub internal_port: u16,
-    /// The internal client of the port mapping
-    /// Can be an IP address or a host name
-    pub internal_client: String,
-    /// A flag whether this port mapping is enabled
-    pub enabled: bool,
-    /// A description for this port mapping
-    pub port_mapping_description: String,
-    /// The lease duration of this port mapping in seconds
-    pub lease_duration: u32,
-}
-
-pub fn parse_get_generic_port_mapping_entry(
-    result: RequestResult,
-) -> Result<PortMappingEntry, GetGenericPortMappingEntryError> {
-    let response = result?;
-    let xml = response.xml;
-    let make_err = |msg: String| || GetGenericPortMappingEntryError::RequestError(RequestError::InvalidResponse(msg));
-    let extract_field = |field: &str| xml.get_child(field).ok_or_else(make_err(format!("{field} is missing")));
-    let remote_host = extract_field("NewRemoteHost")?
-        .get_text()
-        .map(|c| c.into_owned())
-        .unwrap_or_else(|| "".into());
-    let external_port = extract_field("NewExternalPort")?
-        .get_text()
-        .and_then(|t| t.parse::<u16>().ok())
-        .ok_or_else(make_err("Field NewExternalPort is invalid".into()))?;
-    let protocol = match extract_field("NewProtocol")?.get_text() {
-        Some(std::borrow::Cow::Borrowed("UDP")) => PortMappingProtocol::UDP,
-        Some(std::borrow::Cow::Borrowed("TCP")) => PortMappingProtocol::TCP,
-        _ => {
-            return Err(GetGenericPortMappingEntryError::RequestError(
-                RequestError::InvalidResponse("Field NewProtocol is invalid".into()),
-            ))
-        }
-    };
-    let internal_port = extract_field("NewInternalPort")?
-        .get_text()
-        .and_then(|t| t.parse::<u16>().ok())
-        .ok_or_else(make_err("Field NewInternalPort is invalid".into()))?;
-    let internal_client = extract_field("NewInternalClient")?
-        .get_text()
-        .map(|c| c.into_owned())
-        .ok_or_else(make_err("Field NewInternalClient is empty".into()))?;
-    let enabled = match extract_field("NewEnabled")?
-        .get_text()
-        .and_then(|t| t.parse::<u16>().ok())
-        .ok_or_else(make_err("Field Enabled is invalid".into()))?
-    {
-        0 => false,
-        1 => true,
-        _ => {
-            return Err(GetGenericPortMappingEntryError::RequestError(
-                RequestError::InvalidResponse("Field NewEnabled is invalid".into()),
-            ))
-        }
-    };
-    let port_mapping_description = extract_field("NewPortMappingDescription")?
-        .get_text()
-        .map(|c| c.into_owned())
-        .unwrap_or_else(|| "".into());
-    let lease_duration = extract_field("NewLeaseDuration")?
-        .get_text()
-        .and_then(|t| t.parse::<u32>().ok())
-        .ok_or_else(make_err("Field NewLeaseDuration is invalid".into()))?;
-    Ok(PortMappingEntry {
-        remote_host,
-        external_port,
-        protocol,
-        internal_port,
-        internal_client,
-        enabled,
-        port_mapping_description,
-        lease_duration,
-    })
 }
 
 #[test]

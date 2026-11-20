@@ -575,9 +575,7 @@ mod tests {
         let (igd_addr, requests) = mock_igd();
         let gateway = igd::Gateway {
             addr: igd_addr,
-            root_url: format!("http://{igd_addr}/rootDesc.xml"),
             control_url: "/ctl".to_string(),
-            control_schema_url: format!("http://{igd_addr}/scpd.xml"),
             control_schema: igd_control_schema(),
         };
 
