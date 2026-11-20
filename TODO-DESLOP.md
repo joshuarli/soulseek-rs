@@ -9,15 +9,6 @@ Not started.
 
 ## Tickets
 
-### DSLP-8 · P2 · CLI text records and status lines pass peer control sequences to the terminal
-
-- **Area:** security · cli output
-- **Where:** soulseek-rs/src/output.rs (sanitize, Out::status, Out::warn, Out::error)
-- **Problem:** sanitize only replaces tab, CR and LF, so a peer user name, file path, room name or chat message containing ESC or C1 controls reaches stdout in text mode (search, browse, room and message watch commands) unchanged; Out::status, warn and error print their message verbatim to stderr, and callers embed peer names and paths in them. A terminal then executes the sequence (title change, screen clear, OSC 52 clipboard write). JSON mode is unaffected because serde escapes controls.
-- **Recommendation:** Make sanitize replace every control character (is_control) with a space, and give status, warn and error a message sanitizer that keeps only newline and tab. Test both with ESC and U+009B inputs.
-- **Fix with:** security
-- **Effort:** S
-
 ### DSLP-9 · P2 · Port mapping trusts unbounded, arbitrarily nested XML from LAN devices
 
 - **Area:** security · port mapping

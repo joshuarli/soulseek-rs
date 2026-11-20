@@ -101,11 +101,33 @@ pub trait Record: Serialize {
     fn text(&self) -> String;
 }
 
-/// Strip the field and record separators out of peer-supplied text so one
-/// record always occupies exactly one line with stable columns.
+/// Strip the field and record separators out of peer-supplied text.
+///
+/// One record then always occupies exactly one line with stable columns.
+/// Every other control character (ESC, BEL, DEL, the C1 range with the 8-bit
+/// CSI) goes too, because a terminal that shows the record would execute it.
 #[must_use]
 pub fn sanitize(value: &str) -> String {
-    value.replace(['\t', '\r', '\n'], " ")
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Make a progress or diagnostic message safe to show on a terminal. Messages
+/// name peers, rooms and files, so control characters are replaced with
+/// U+FFFD; newline and tab stay, as a message may span lines.
+fn displayable(message: &str) -> String {
+    message
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Where records go and whether progress is shown.
@@ -141,26 +163,37 @@ impl Out {
     /// Progress and narration. Suppressed by `--quiet`, never on stdout.
     pub fn status(&self, message: &str) {
         if !self.quiet {
-            let _ = writeln!(std::io::stderr(), "{message}");
+            let _ = Self::write_status(&mut std::io::stderr(), message);
         }
     }
 
     /// A problem worth reporting that is not fatal. Shown even when quiet,
     /// because silently doing less than asked is worse than a stray line.
     pub fn warn(&self, message: &str) {
-        let _ = if self.color {
-            writeln!(std::io::stderr(), "\x1b[33mwarning:\x1b[0m {message}")
-        } else {
-            writeln!(std::io::stderr(), "warning: {message}")
-        };
+        let _ = self.write_problem(&mut std::io::stderr(), "warning", 33, message);
     }
 
     pub fn error(&self, message: &str) {
-        let _ = if self.color {
-            writeln!(std::io::stderr(), "\x1b[31merror:\x1b[0m {message}")
+        let _ = self.write_problem(&mut std::io::stderr(), "error", 31, message);
+    }
+
+    fn write_status(sink: &mut impl Write, message: &str) -> std::io::Result<()> {
+        writeln!(sink, "{}", displayable(message))
+    }
+
+    fn write_problem(
+        &self,
+        sink: &mut impl Write,
+        label: &str,
+        colour: u8,
+        message: &str,
+    ) -> std::io::Result<()> {
+        let message = displayable(message);
+        if self.color {
+            writeln!(sink, "\x1b[{colour}m{label}:\x1b[0m {message}")
         } else {
-            writeln!(std::io::stderr(), "error: {message}")
-        };
+            writeln!(sink, "{label}: {message}")
+        }
     }
 
     // a closed downstream (`| head -1`) is a normal end for a
@@ -640,6 +673,56 @@ mod tests {
             sanitize("plain (name) [2024].mp3"),
             "plain (name) [2024].mp3"
         );
+    }
+
+    #[test]
+    fn sanitize_removes_terminal_control_characters_from_records() {
+        let hostile = "bob\x1b]0;pwned\x07\x1b[2J\u{9b}31m\x7f.mp3";
+        let clean = sanitize(hostile);
+        assert_eq!(clean, "bob ]0;pwned  [2J 31m .mp3");
+        assert!(!clean.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn a_control_sequence_in_a_peer_name_or_path_cannot_reach_a_text_record() {
+        let record = SearchRecord {
+            user: "mallory\x1b]0;x\x07".into(),
+            path: "dir\\\x1b[2Jevil\u{9b}.mp3".into(),
+            ..search_record()
+        };
+        let text = record.text();
+        assert!(!text.chars().any(|c| c.is_control() && c != '\t'), "{text:?}");
+        assert_eq!(text.split('\t').count(), 4);
+    }
+
+    #[test]
+    fn status_warnings_and_errors_reach_the_terminal_without_controls() {
+        let hostile = "resume \x1b]0;x\x07\u{9b}31m.mp3";
+        let mut status = Vec::new();
+        Out::write_status(&mut status, hostile).unwrap();
+        assert_eq!(status, "resume \u{FFFD}]0;x\u{FFFD}\u{FFFD}31m.mp3\n".as_bytes());
+
+        for color in [false, true] {
+            let out = Out { json: false, quiet: false, color };
+            let mut line = Vec::new();
+            out.write_problem(&mut line, "warning", 33, hostile).unwrap();
+            let line = String::from_utf8(line).unwrap();
+            // Only our own colour sequences may remain.
+            let without_ours = line.replace("\x1b[33m", "").replace("\x1b[0m", "");
+            assert!(!without_ours.contains('\x1b'), "{line:?}");
+            assert!(!without_ours.contains('\x07') && !without_ours.contains('\u{9b}'), "{line:?}");
+            assert_eq!(line.contains("\x1b[33mwarning:\x1b[0m"), color, "{line:?}");
+            assert!(line.contains("\u{FFFD}]0;x"), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn messages_keep_their_lines_but_lose_terminal_controls() {
+        assert_eq!(
+            displayable("cannot resume \x1b]0;x\x07a\u{9b}b\x7f\nnext\tline"),
+            "cannot resume \u{FFFD}]0;x\u{FFFD}a\u{FFFD}b\u{FFFD}\nnext\tline"
+        );
+        assert_eq!(displayable("plain – ünï 日本"), "plain – ünï 日本");
     }
 
     #[test]
