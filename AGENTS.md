@@ -49,11 +49,17 @@ into a failure, but the pull request workflow does not set it. See
 
 ## Verification
 
-- `make test`: cold 251.87s, warm 16.40s on a busy macOS host with four build
-  jobs; optional soulfind cases skipped. `make lint`: 180.94s cold, clippy on
-  all targets.
-- CLI flags and exit codes: `soulseek-rs/tests/cli_e2e.rs`; TUI rendering:
-  `soulseek-rs/tests/tui_snapshots.rs`.
+- `make test` (CI: `.github/workflows/ci.yml`, on `pull_request` and pushes to
+  `main`): 981 passed, 2 ignored; cold 251.87s, warm 27s on a busy macOS host
+  with four build jobs. `make lint` (workflow `lint.yml`): cold 180.94s, warm
+  39s, clippy on all targets with `-D warnings`.
+- Without a local soulfind (`SOULFIND_BIN` or `soulfind/bin/soulfind`) the
+  server-dependent e2e tests return early and count as passing; `make test`
+  never reaches the real Soulseek network.
+- CLI flags and exit codes: `soulseek-rs/tests/cli_e2e.rs` (needs soulfind);
+  TUI frames: `soulseek-rs/tests/tui_snapshots.rs` (needs
+  `--features fixtures`, not part of `make test`); window logic over a test
+  backend: unit tests under `soulseek-rs/src/ui`.
 - Library client and peer protocol: `soulseek-rs-lib/tests/e2e.rs` needs a local
   soulfind; `resume_e2e.rs` uses local sockets. The binary consumes the library.
 - Daemon JSON-RPC and authentication: `soulseek-rs/tests/daemon_protocol_e2e.rs`
@@ -62,5 +68,6 @@ into a failure, but the pull request workflow does not set it. See
   persistence, port mapping and terminal UI.
 - Performance workload: `soulseek-rs-lib/examples/stress.rs` requires a local
   server; a repeatable local-server baseline has not been established.
-- Vendored IGD: https://github.com/dariusc93/rust-igd, version 0.17.1,
-  subsequently modified in this repository.
+- Vendored IGD (`soulseek-rs/src/port_mapping/igd/`): https://github.com/dariusc93/rust-igd,
+  version 0.17.1, revision not recorded, modified in this repository (commit
+  `0737f12`).
