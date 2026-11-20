@@ -1,5 +1,5 @@
 Prefix: DSLP
-Next: 17
+Next: 18
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier E). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
@@ -8,15 +8,6 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 Not started.
 
 ## Tickets
-
-### DSLP-9 · P2 · Port mapping trusts unbounded, arbitrarily nested XML from LAN devices
-
-- **Area:** security · port mapping
-- **Where:** soulseek-rs/src/port_mapping/igd/http.rs (send: read_to_end); soulseek-rs/src/port_mapping/igd/common/parsing.rs (parse_control_urls, parse_schemas, parse_response)
-- **Problem:** Gateway discovery fetches the device description and SCPD from whatever host answers the SSDP search, so any LAN host controls the body. send() reads the whole body with read_to_end and no cap, and xmltree::Element::parse is recursive: a temporary test parsing a 700 kB document of 100,000 nested elements aborted the process with 'has overflowed its stack' (SIGABRT, probe restored). A stack-overflow abort skips the terminal restore, and an endless body exhausts memory.
-- **Recommendation:** Cap the response body (1 MiB) and reject XML nested deeper than 64 elements before parsing, in every parse entry point. Test the cap with a local listener bound to port 0 and the depth limit with a generated document.
-- **Fix with:** security
-- **Effort:** S
 
 ### DSLP-10 · P2 · Library logger writes peer-supplied text to stderr unescaped
 
@@ -80,4 +71,13 @@ Not started.
 - **Recommendation:** Add one deterministic benchmark each (a full-window draw over the fixture session with the TestBackend; parsing a captured file-search response) outside make test.
 - **Fix with:** bench-pyramid
 - **Effort:** M
+
+### DSLP-17 · P3 · Port mapping follows any address named in an SSDP reply
+
+- **Area:** security · port mapping
+- **Where:** soulseek-rs/src/port_mapping/igd/common/parsing.rs (parse_location); soulseek-rs/src/port_mapping/igd/search.rs
+- **Problem:** Discovery fetches the description from the host:port in the LOCATION header of whichever datagram arrives first, not from the address that sent it, and a bad datagram aborts the search with ? instead of being skipped. A LAN host can steer the client's HTTP requests to another address or end discovery early.
+- **Recommendation:** Take the gateway address from the datagram's source (recv_from) and accept only a LOCATION that names it; continue past an unparsable reply.
+- **Fix with:** security
+- **Effort:** S
 

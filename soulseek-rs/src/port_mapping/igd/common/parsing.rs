@@ -1,10 +1,75 @@
 use std::collections::HashMap;
-use std::io;
 use std::net::{IpAddr, SocketAddr};
 
 use xmltree::{self, Element};
 
 use super::super::errors::{AddPortError, GetExternalIpError, RemovePortError, RequestError, SearchError};
+
+/// How deeply a gateway's XML may nest. Real device descriptions nest under ten
+/// levels; the parser recurses per level, so an unbounded document from any
+/// host on the LAN would overflow the stack and abort the process.
+const MAX_XML_DEPTH: usize = 32;
+
+/// Whether `xml` opens more than `limit` elements at once, found without
+/// building a tree. Counts conservatively: comments, CDATA, processing
+/// instructions and declarations are skipped as the parser skips them, and
+/// quotes inside a tag are honoured so an attribute cannot hide a `/>`.
+fn nests_deeper_than(xml: &[u8], limit: usize) -> bool {
+    fn find(haystack: &[u8], from: usize, needle: &[u8]) -> usize {
+        haystack[from..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .map_or(haystack.len(), |at| from + at + needle.len())
+    }
+
+    let mut depth = 0usize;
+    let mut i = 0;
+    while let Some(offset) = xml[i..].iter().position(|&byte| byte == b'<') {
+        i += offset;
+        let rest = &xml[i..];
+        if rest.starts_with(b"<!--") {
+            i = find(xml, i + 4, b"-->");
+        } else if rest.starts_with(b"<![CDATA[") {
+            i = find(xml, i + 9, b"]]>");
+        } else if rest.starts_with(b"<?") {
+            i = find(xml, i + 2, b"?>");
+        } else if rest.starts_with(b"<!") {
+            i = find(xml, i + 2, b">");
+        } else if rest.starts_with(b"</") {
+            depth = depth.saturating_sub(1);
+            i = find(xml, i + 2, b">");
+        } else {
+            let mut quote = None;
+            let mut j = i + 1;
+            let mut self_closing = false;
+            while j < xml.len() {
+                let byte = xml[j];
+                match quote {
+                    Some(open) if byte == open => quote = None,
+                    Some(_) => {}
+                    None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+                    None if byte == b'>' => {
+                        self_closing = xml[j - 1] == b'/';
+                        break;
+                    }
+                    None => {}
+                }
+                j += 1;
+            }
+            if !self_closing {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            i = j + 1;
+        }
+        if i >= xml.len() {
+            break;
+        }
+    }
+    false
+}
 
 // Parse the result.
 pub fn parse_search_result(text: &str) -> Result<(SocketAddr, String), SearchError> {
@@ -46,10 +111,10 @@ fn parse_location(url: &str) -> Option<(SocketAddr, String)> {
     Some((addr, path))
 }
 
-pub fn parse_control_urls<R>(resp: R) -> Result<(String, String), SearchError>
-where
-    R: io::Read,
-{
+pub fn parse_control_urls(resp: &[u8]) -> Result<(String, String), SearchError> {
+    if nests_deeper_than(resp, MAX_XML_DEPTH) {
+        return Err(SearchError::InvalidResponse);
+    }
     let root = Element::parse(resp)?;
 
     let mut urls = root.children.iter().filter_map(|child| {
@@ -129,10 +194,10 @@ fn parse_service(service: &Element) -> Option<(String, String)> {
     }
 }
 
-pub fn parse_schemas<R>(resp: R) -> Result<HashMap<String, Vec<String>>, SearchError>
-where
-    R: io::Read,
-{
+pub fn parse_schemas(resp: &[u8]) -> Result<HashMap<String, Vec<String>>, SearchError> {
+    if nests_deeper_than(resp, MAX_XML_DEPTH) {
+        return Err(SearchError::InvalidResponse);
+    }
     let root = Element::parse(resp)?;
 
     let mut schema = root.children.iter().filter_map(|child| {
@@ -204,6 +269,9 @@ pub struct RequestReponse {
 pub type RequestResult = Result<RequestReponse, RequestError>;
 
 pub fn parse_response(text: String, ok: &str) -> RequestResult {
+    if nests_deeper_than(text.as_bytes(), MAX_XML_DEPTH) {
+        return Err(RequestError::InvalidResponse(text));
+    }
     let mut xml = match xmltree::Element::parse(text.as_bytes()) {
         Ok(xml) => xml,
         Err(..) => return Err(RequestError::InvalidResponse(text)),
@@ -592,4 +660,52 @@ fn test_parse_device3() {
     let (control_schema_url, control_url) = parse_control_urls(text.as_bytes()).unwrap();
     assert_eq!(control_url, "/upnp/control/WANIPConn1");
     assert_eq!(control_schema_url, "/332b484d/wanipconnSCPD.xml");
+}
+
+#[cfg(test)]
+mod limits {
+    use super::*;
+
+    fn nested(open: &str, close: &str, depth: usize) -> String {
+        format!("<root>{}{}</root>", open.repeat(depth), close.repeat(depth))
+    }
+
+    #[test]
+    fn a_deeply_nested_document_is_refused_instead_of_overflowing_the_stack() {
+        // 100,000 levels aborted the process with a stack overflow before the
+        // depth limit existed.
+        let xml = nested("<a>", "</a>", 100_000);
+        assert!(matches!(parse_control_urls(xml.as_bytes()), Err(SearchError::InvalidResponse)));
+        assert!(matches!(parse_schemas(xml.as_bytes()), Err(SearchError::InvalidResponse)));
+        assert!(matches!(
+            parse_response(xml, "AddPortMappingResponse"),
+            Err(RequestError::InvalidResponse(_))
+        ));
+    }
+
+    #[test]
+    fn the_depth_limit_is_exact() {
+        let at_limit = nested("<a>", "</a>", MAX_XML_DEPTH - 1);
+        let over = nested("<a>", "</a>", MAX_XML_DEPTH);
+        assert!(!nests_deeper_than(at_limit.as_bytes(), MAX_XML_DEPTH));
+        assert!(nests_deeper_than(over.as_bytes(), MAX_XML_DEPTH));
+    }
+
+    #[test]
+    fn markup_that_looks_like_nesting_cannot_hide_or_fake_it() {
+        let deep = |open: &str| nested(open, "</a>", 1000);
+        // An attribute value holding `/>` does not close the tag.
+        assert!(nests_deeper_than(deep(r#"<a b="/>">"#).as_bytes(), 32));
+        assert!(nests_deeper_than(deep("<a b='\"/>'>").as_bytes(), 32));
+        // Real self-closing elements do not nest.
+        let flat = format!("<root>{}</root>", "<a/>".repeat(1000));
+        assert!(!nests_deeper_than(flat.as_bytes(), 32));
+        // Comments and CDATA are text, not elements.
+        let text = format!("<root><!--{}--><![CDATA[{}]]></root>", "<a>".repeat(1000), "<a>".repeat(1000));
+        assert!(!nests_deeper_than(text.as_bytes(), 32));
+        // An unterminated tag or comment ends the scan without panicking.
+        for xml in ["<a", "<a b=\"", "<!--", "<![CDATA[", "<?", "</", "<"] {
+            let _ = nests_deeper_than(xml.as_bytes(), 32);
+        }
+    }
 }
