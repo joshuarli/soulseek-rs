@@ -9,15 +9,6 @@ Not started.
 
 ## Tickets
 
-### DSLP-7 · P1 · Peer chat and room text reaches the terminal with raw control sequences
-
-- **Area:** security · terminal rendering
-- **Where:** soulseek-rs/src/ui/tui/buffer.rs (set_stringn, glyph); soulseek-rs/src/ui/tui/terminal.rs (AnsiBackend::draw)
-- **Problem:** Any peer or room member can make the TUI emit raw ESC, BEL and C1 bytes. Reproduced against the built tui-fixture binary in a PTY with a temporary fixture change (restored): a room message 'been on repeat \x1b]0;PWNED-ROOM\x07all week' and a chat text containing OSC 0, CSI 2J and U+009B reached the terminal byte-for-byte inside the cell stream (OSC title count 1 each, C1 CSI count 1). unicode-width gives control characters width 1 as a str, so Buffer::glyph stores them as cell symbols and AnsiBackend::draw writes them. The same path renders usernames, file names, paths and room names. Impact: screen and title spoofing, and terminal-specific escapes such as OSC 52 clipboard writes and answerback injection.
-- **Recommendation:** Neutralize every control character (is_control: C0, DEL, C1) at the one place all widgets draw through, Buffer::set_stringn, by drawing U+FFFD instead; keep width accounting. Add a regression test through the TestBackend and the AnsiBackend byte stream that fails before the fix.
-- **Fix with:** security
-- **Effort:** S
-
 ### DSLP-8 · P2 · CLI text records and status lines pass peer control sequences to the terminal
 
 - **Area:** security · cli output

@@ -120,35 +120,7 @@ impl Backend for AnsiBackend {
 
     fn draw(&mut self, previous: &Buffer, current: &Buffer) -> io::Result<()> {
         let mut stdout = io::stdout().lock();
-        let mut output = String::new();
-        let mut output_position: Option<(u16, u16)> = None;
-        let mut output_style = None;
-        for y in current.area.y..current.area.bottom() {
-            for x in current.area.x..current.area.right() {
-                let Some(cell) = current.cell(Position::new(x, y)) else {
-                    continue;
-                };
-                if cell.width == 0 {
-                    continue;
-                }
-                let unchanged = previous
-                    .cell(Position::new(x, y))
-                    .is_some_and(|old| old == cell);
-                if unchanged {
-                    continue;
-                }
-                if output_position != Some((x, y)) {
-                    write_move(&mut output, x, y);
-                }
-                if output_style != Some(cell.style) {
-                    output.push_str(&cell.style.sgr());
-                    output_style = Some(cell.style);
-                }
-                output.push_str(&cell.symbol);
-                output_position = Some((x.saturating_add(cell.width()), y));
-            }
-        }
-        stdout.write_all(output.as_bytes())
+        stdout.write_all(encode_changes(previous, current).as_bytes())
     }
 
     fn set_cursor(&mut self, position: Option<Position>) -> io::Result<()> {
@@ -167,6 +139,40 @@ impl Backend for AnsiBackend {
     fn flush(&mut self) -> io::Result<()> {
         io::stdout().lock().flush()
     }
+}
+
+/// The bytes that turn `previous` into `current` on a terminal: cursor moves
+/// and style changes around the symbols of the cells that differ.
+fn encode_changes(previous: &Buffer, current: &Buffer) -> String {
+    let mut output = String::new();
+    let mut output_position: Option<(u16, u16)> = None;
+    let mut output_style = None;
+    for y in current.area.y..current.area.bottom() {
+        for x in current.area.x..current.area.right() {
+            let Some(cell) = current.cell(Position::new(x, y)) else {
+                continue;
+            };
+            if cell.width == 0 {
+                continue;
+            }
+            let unchanged = previous
+                .cell(Position::new(x, y))
+                .is_some_and(|old| old == cell);
+            if unchanged {
+                continue;
+            }
+            if output_position != Some((x, y)) {
+                write_move(&mut output, x, y);
+            }
+            if output_style != Some(cell.style) {
+                output.push_str(&cell.style.sgr());
+                output_style = Some(cell.style);
+            }
+            output.push_str(&cell.symbol);
+            output_position = Some((x.saturating_add(cell.width()), y));
+        }
+    }
+    output
 }
 
 fn write_move(output: &mut String, x: u16, y: u16) {
@@ -305,5 +311,42 @@ impl Terminal<AnsiBackend> {
 
     pub fn restore(&mut self) -> io::Result<()> {
         restore_terminal()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::tui::style::Style;
+
+    #[test]
+    fn peer_text_cannot_inject_control_sequences_into_the_byte_stream() {
+        let area = Rect::new(0, 0, 60, 1);
+        let mut current = Buffer::empty(area);
+        current.set_stringn(
+            0,
+            0,
+            "hi \x1b]0;pwned\x07 \x1b[2J \u{9b}31m \x07 done",
+            60,
+            Style::default(),
+        );
+        let bytes = encode_changes(&Buffer::empty(area), &current);
+
+        // Blank cells are not rewritten, so the text arrives in pieces; the
+        // neutralised sequences are shown, not dropped.
+        assert!(bytes.contains("hi"), "{bytes:?}");
+        assert!(bytes.contains("\u{FFFD}]0;pwned\u{FFFD}"), "{bytes:?}");
+        assert!(bytes.contains("done"), "{bytes:?}");
+        assert!(!bytes.contains("\x1b]"), "OSC reached the terminal: {bytes:?}");
+        assert!(!bytes.contains('\x07'), "BEL reached the terminal: {bytes:?}");
+        assert!(!bytes.contains("\x1b[2J"), "CSI 2J reached the terminal: {bytes:?}");
+        assert!(!bytes.contains('\u{9b}'), "8-bit CSI reached the terminal: {bytes:?}");
+        // What remains is the backend's own cursor moves and style changes:
+        // every ESC is followed by `[` and ends in `H` or `m`.
+        for sequence in bytes.split('\x1b').skip(1) {
+            let body = sequence.strip_prefix('[').expect("only CSI sequences");
+            let end = body.find(|c: char| c.is_ascii_alphabetic()).expect("terminated");
+            assert!(matches!(&body[end..=end], "H" | "m"), "{bytes:?}");
+        }
     }
 }

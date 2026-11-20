@@ -45,6 +45,19 @@ impl Cell {
     }
 }
 
+/// What a cell may hold for `character`. Text here comes from peers and
+/// servers, and a cell's symbol is written to the terminal as it is, so a
+/// control character (ESC, BEL, DEL, the C1 range including the 8-bit CSI)
+/// would be executed by the terminal rather than shown. Each one is drawn
+/// as U+FFFD instead.
+fn displayable(character: char) -> char {
+    if character.is_control() {
+        '\u{FFFD}'
+    } else {
+        character
+    }
+}
+
 pub struct Buffer {
     pub area: Rect,
     pub content: Vec<Cell>,
@@ -115,7 +128,7 @@ impl Buffer {
         let end = x.saturating_add(max_width).min(self.area.right());
         let mut x = x;
         let mut glyph = String::new();
-        for character in text.chars() {
+        for character in text.chars().map(displayable) {
             if glyph.is_empty() {
                 glyph.push(character);
                 continue;
@@ -230,5 +243,42 @@ impl Buffer {
             output.push('\n');
         }
         output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOSTILE: &str = "a\x1b]0;pwned\x07b\x1b[2Jc\u{9b}31md\x7fe\tf\ng\0";
+
+    fn symbols(buffer: &Buffer) -> String {
+        buffer.content.iter().map(|cell| cell.symbol.as_str()).collect()
+    }
+
+    #[test]
+    fn control_characters_are_drawn_as_replacement_characters() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let end = buffer.set_stringn(0, 0, HOSTILE, 40, Style::default());
+        let drawn = symbols(&buffer);
+        assert!(
+            !drawn.chars().any(char::is_control),
+            "control character in a cell: {drawn:?}"
+        );
+        let shown: String = buffer.content[..usize::from(end)]
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        assert_eq!(
+            shown,
+            "a\u{FFFD}]0;pwned\u{FFFD}b\u{FFFD}[2Jc\u{FFFD}31md\u{FFFD}e\u{FFFD}f\u{FFFD}g\u{FFFD}"
+        );
+    }
+
+    #[test]
+    fn ordinary_text_is_unchanged() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 1));
+        buffer.set_stringn(0, 0, "Müller – 日本語 🦀", 20, Style::default());
+        assert!(buffer.to_text().starts_with("Müller – 日本語 🦀"));
     }
 }
