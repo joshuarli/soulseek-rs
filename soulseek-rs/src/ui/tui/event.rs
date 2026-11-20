@@ -1,9 +1,9 @@
 //! Keyboard and mouse events decoded from the terminal byte stream.
 
-use rustix::event::{self, FdSetElement, Timespec};
+use rustix::event::{self, PollFd, PollFlags, Timespec};
 use std::collections::VecDeque;
 use std::io;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -520,24 +520,41 @@ fn read_bytes(input: &mut Input) -> io::Result<()> {
 }
 
 fn input_ready(timeout: Duration) -> io::Result<bool> {
-    let stdin = io::stdin();
-    let descriptor: RawFd = stdin.as_raw_fd();
-    let mut descriptors =
-        vec![FdSetElement::default(); event::fd_set_num_elements(1, descriptor + 1)];
-    event::fd_set_insert(&mut descriptors, descriptor);
+    fd_ready(io::stdin().as_fd(), timeout)
+}
+
+/// Whether `descriptor` has input (or hang-up) pending within `timeout`.
+fn fd_ready(descriptor: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
     let timeout = Timespec::try_from(timeout).map_err(|_| {
         io::Error::new(io::ErrorKind::InvalidInput, "input timeout too large")
     })?;
-    // SAFETY: the only descriptor in the set is borrowed from the live stdin
-    // handle, and the timeout is a local value that outlives the call.
-    let ready = unsafe {
-        event::select(
-            descriptor + 1,
-            Some(&mut descriptors),
-            None,
-            None,
-            Some(&timeout),
-        )
-    }?;
+    let mut descriptors = [PollFd::new(&descriptor, PollFlags::IN)];
+    let ready = event::poll(&mut descriptors, Some(&timeout))?;
     Ok(ready != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn an_idle_descriptor_is_not_ready() {
+        let (reader, _writer) = std::io::pipe().expect("pipe");
+        assert!(!fd_ready(reader.as_fd(), Duration::from_millis(20)).unwrap());
+    }
+
+    #[test]
+    fn pending_bytes_make_a_descriptor_ready() {
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        writer.write_all(b"x").expect("write");
+        assert!(fd_ready(reader.as_fd(), Duration::from_secs(5)).unwrap());
+    }
+
+    #[test]
+    fn a_closed_writer_is_ready_so_end_of_input_is_read() {
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        drop(writer);
+        assert!(fd_ready(reader.as_fd(), Duration::from_secs(5)).unwrap());
+    }
 }

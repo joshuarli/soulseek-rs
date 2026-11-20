@@ -1,5 +1,5 @@
 Prefix: DSLP
-Next: 13
+Next: 14
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier E). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
@@ -17,15 +17,6 @@ Not started.
 - **Recommendation:** Neutralize every control character (is_control: C0, DEL, C1) at the one place all widgets draw through, Buffer::set_stringn, by drawing U+FFFD instead; keep width accounting. Add a regression test through the TestBackend and the AnsiBackend byte stream that fails before the fix.
 - **Fix with:** security
 - **Effort:** S
-
-### DSLP-3 · P2 · Types: strict profile and typing findings
-
-- **Area:** deslop · types
-- **Where:** type checker and lint configuration; Rust sources
-- **Problem:** The strict-profile candidates in the deslop skill's tools reference have not been measured here.
-- **Recommendation:** Run the deslop Types step. Accept: clean at the adopted profile, escape hatches not increased, witnesses recorded.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
 
@@ -98,4 +89,13 @@ Not started.
 - **Recommendation:** After the control-character fix, decide whether to replace bidi override and isolate characters (U+202A..U+202E, U+2066..U+2069) the same way.
 - **Fix with:** security
 - **Effort:** S
+
+### DSLP-13 · P3 · TUI snapshot tests are stale and outside make test
+
+- **Area:** verification · tui snapshots
+- **Where:** soulseek-rs/tests/tui_snapshots.rs; soulseek-rs/tests/snapshots/*.ptytest
+- **Problem:** cargo test -p soulseek-rs --features fixtures --test tui_snapshots fails 4 of 5 tests at HEAD without any change of this pass (verified by restoring the previous event.rs): the recorded frames lack the Status pane the window now draws (narrow_window_still_fits expects Results at row 0, the window draws Status first), and the tiny-window test times out. The tests need the fixtures feature, so make test and CI never run them.
+- **Recommendation:** Decide whether the window or the frames are right, re-record with PTYTEST_UPDATE_SNAPSHOTS=1, and run the suite in make test (or CI) once green.
+- **Fix with:** test-pyramid
+- **Effort:** M
 
