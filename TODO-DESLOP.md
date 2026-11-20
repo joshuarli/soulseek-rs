@@ -5,7 +5,49 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
-Not started.
+Base: 8d8b654 (start of this pass; DSLP-1 closed in 3e12318). Host: busy macOS, four build jobs, no soulfind.
+
+**Scorecard** (before, after)
+
+- Source and tests: net +77 lines in 20 files (728 added, 651 removed); about 390 lines of dead vendored IGD code and one dependency (`fastrand`) removed, about 440 lines of tests and fixes added.
+- `make test`: 981 passed, 2 ignored, warm 27s, cold 251.87s; after 1002 passed, 2 ignored, warm 33s to 53s on the busy host. `make lint` clean, warm 39s to 86s, cold 180.94s.
+- Coverage and mutation: not measured, `cargo-llvm-cov` and `cargo-mutants` are not installed (Needs environment). New boundary tests are proven by hand-injected faults: 2 + 4 + 3 + 4 + 5 faults across the poll helper, daemon transport, TUI buffer, CLI output and IGD limits, every one failing the intended test and restored.
+- Escape hatches in our changed files (non-test unsafe, allow, unwrap, expect): 33 to 32; one `unsafe` block deleted (select to poll). Adopted lint settings: none. Rejected with counts (our files): indexing_slicing 88, wildcard_enum_match_arm 50, as_conversions 31, needless_pass_by_value 19, cast_possible_truncation 16, cast_sign_loss 5, expect_used 6, unsafe_code forbid (7 sites, 4 without a safe equivalent).
+- Dead code removed: 17 rustc dead-code items in the vendored IGD module and its `#![allow(dead_code)]`; the `fastrand` dependency.
+- Findings: filed 2 P1/P2 security defects reproduced and fixed (DSLP-7 P1, DSLP-8 P2), 1 P2 fixed (DSLP-9), 1 P2 needing the owner (DSLP-10), P3 filed: DSLP-6, 11, 12, 13, 15, 16, 17.
+- Perf verdict: the stress workload needs soulfind (blocked, Needs environment). Hot path `Buffer::set_stringn` micro-timing, six interleaved release pairs: old 6.45 to 6.87 us, new 6.41 to 7.06 us per 170-character call, median paired ratio about 1.04 on a busy host (about 0.25 us per call); undecided absolute number deferred.
+- Escaped regressions: none known.
+
+**Per step**
+
+- Ground (c603fd0): DSLP-1 was already closed; re-measured and recorded costs. CI runs `make test` on `pull_request` (ci.yml) and `make lint` (lint.yml). 10 minutes.
+- Diagnose (3f6aba0): reviewed peer text to the terminal, peer paths, daemon framing, IGD parsing, secrets. Reproduced against the built fixture binary in a PTY: OSC, CSI 2J, 8-bit CSI and BEL from room, chat and name text reached the terminal raw (DSLP-7). Reproduced a stack-overflow abort from a 700 kB nested XML (DSLP-9). Found sound: download names (last path segment), per-user directory names, daemon request cap and connection cap, credentials mode.
+- Types (b4f238b): profile measured and rejected as above; `input_ready` uses safe `rustix::poll`, three pipe tests.
+- Tests (8621119): daemon framing and connection limits had only soulfind-dependent tests; three local-socket tests added. The commit message says four tests, it is three (history is not amended).
+- Dead code (8387836): vendored IGD unused API removed with the allow; cargo-machete and cargo-udeps missing (Needs environment), dependencies checked by hand.
+- Bench (222f113): one benchmark (`scripts/stress.sh`, baseline 97.78), needs soulfind; no `make bench` entrypoint could be proven (DSLP-15, DSLP-16).
+- Findings: DSLP-7 (f86757c), DSLP-8 (377fb5b), DSLP-9 (075d7c8), each with a regression test that failed before the fix.
+- Report: self-review of the cumulative diff (no second reviewer available): found and fixed a `const fn` that needs Rust 1.97 against the 1.91 MSRV before it was committed; no other defects.
+
+**Needs owner**
+
+- DSLP-10 (P2): the upstream library logger writes peer text to stderr unescaped; fixing it edits upstream code, which this pass may not do.
+- Commit trailers: the task asked for a `Co-Authored-By` trailer, but this repository's AGENTS.md forbids assistant trailers and its hook strips them, so none were written.
+
+**Needs environment**
+
+- soulfind: `cli_e2e`, `daemon_protocol_e2e`, `tui_e2e`, lib `e2e` (208 tests skipped as passing, DSLP-6) and `scripts/stress.sh` (DSLP-15).
+- `cargo-llvm-cov`, `cargo-mutants`, `cargo-machete`, `cargo-udeps`.
+
+**Method feedback**
+
+- A skipped-as-passing test tier hides the most important boundaries; `make test` count alone said nothing about server coverage. The Verification section should state which tier is skipped.
+- Hand-injected faults found two weak first drafts: the oversized-line test passed without the check (the junk line closed an unauthenticated connection anyway), and the endless-body test passed without the read cap. Both were rewritten to observe the bound, not the error.
+- The PTY frame tests were stale and unused by `make test` (DSLP-13); no step of the procedure asks whether the declared boundary test even passes.
+
+**Shared-file gaps**
+
+- None in stuff or usr; the deslop skill's trailer instruction conflicts with repositories that forbid assistant trailers.
 
 ## Tickets
 

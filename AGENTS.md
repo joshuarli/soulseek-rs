@@ -50,7 +50,7 @@ into a failure, but the pull request workflow does not set it. See
 ## Verification
 
 - `make test` (CI: `.github/workflows/ci.yml`, on `pull_request` and pushes to
-  `main`): 984 passed, 2 ignored; cold 251.87s, warm 27s to 64s on a busy
+  `main`): 1002 passed, 2 ignored; cold 251.87s, warm 27s to 64s on a busy
   macOS host with four build jobs. `make lint` (`lint.yml`): cold 180.94s,
   warm 39s to 86s, clippy on all targets with `-D warnings`.
 - Tiers (warm): unit about 770 tests (`soulseek-rs`, `soulseek-rs-lib`; 1s each); local-socket tests (daemon transport bounds in
