@@ -1,5 +1,5 @@
 Prefix: DSLP
-Next: 6
+Next: 7
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier E). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
@@ -43,5 +43,14 @@ Not started.
 - **Problem:** No dead-code scan has run.
 - **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
 - **Fix with:** deslop
+- **Effort:** M
+
+### DSLP-6 · P3 · Make skipped server scenarios visible in CI
+
+- **Area:** verification · server scenarios
+- **Where:** .github/workflows/ci.yml; soulseek-rs-lib/tests/e2e.rs:208; README.md:757
+- **Problem:** The pull request workflow runs make test without a local soulfind or SOULSEEK_E2E_REQUIRED. Server-dependent tests return early and are counted as passing; README claims CI supplies the server. With SOULFIND_BIN pointing to a missing path, connect_and_login_succeed reports a skip and exits successfully.
+- **Recommendation:** Provide a local server in an authorized CI change and require it, or explicitly report the missing scenario coverage; correct the CI description alongside that change.
+- **Fix with:** test-pyramid
 - **Effort:** M
 
