@@ -777,7 +777,6 @@ dependencies = [
  "deser-toml",
  "deser-value",
  "directories",
- "fastrand",
  "getrandom 0.4.3",
  "h12tiny",
  "kasuari",

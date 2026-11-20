@@ -580,7 +580,10 @@ pub use transport::{Listener, bind_tcp};
 #[cfg(test)]
 mod tests {
     use super::super::proto::{CODE_METHOD_NOT_FOUND, CODE_PARSE};
-    use super::transport::{accepts, answer, constant_time_eq};
+    use super::transport::{
+        Listener, MAX_CONNECTIONS, MAX_LINE, accepts, answer, bind_tcp,
+        constant_time_eq,
+    };
     use super::*;
     use deser_value::value;
     use std::sync::mpsc::Receiver;
@@ -613,6 +616,118 @@ mod tests {
         assert!(!constant_time_eq("abc", "abcd"));
         assert!(!constant_time_eq("", "a"));
         assert!(constant_time_eq("", ""));
+    }
+
+    /// A daemon serving a TCP listener on a port the OS picked, as the real
+    /// accept loop does. The loop never returns, so its thread ends with the
+    /// test process.
+    fn serve_on_port_zero(token: &str) -> (std::net::SocketAddr, Arc<Daemon>) {
+        let daemon = Arc::new(daemon_with_token(token));
+        let listener = bind_tcp("127.0.0.1:0").expect("bind");
+        let Listener::Tcp(tcp) = &listener else {
+            unreachable!("bind_tcp binds a TCP listener");
+        };
+        let address = tcp.local_addr().expect("local address");
+        let served = Arc::clone(&daemon);
+        std::thread::spawn(move || listener.serve(served));
+        (address, daemon)
+    }
+
+    fn connect(address: std::net::SocketAddr) -> std::net::TcpStream {
+        let stream = std::net::TcpStream::connect(address).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        stream
+    }
+
+    /// Read until the daemon closes the connection. `Err` means it did not
+    /// close within the read timeout.
+    fn read_until_closed(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
+        use std::io::Read;
+        let mut received = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => return Ok(String::from_utf8_lossy(&received).into()),
+                Ok(n) => received.extend_from_slice(&chunk[..n]),
+                // The daemon closed with unread data queued: a reset is a close.
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                    return Ok(String::from_utf8_lossy(&received).into());
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Authenticate over `stream` and return once the daemon has answered.
+    fn authenticate(stream: &mut std::net::TcpStream, token: &str) -> String {
+        use std::io::{BufRead, Write};
+        writeln!(
+            stream,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"auth","params":{{"token":"{token}"}}}}"#
+        )
+        .expect("send");
+        let mut reply = String::new();
+        std::io::BufReader::new(stream.try_clone().expect("clone"))
+            .read_line(&mut reply)
+            .expect("a reply");
+        reply
+    }
+
+    #[test]
+    fn an_oversized_request_line_ends_an_authenticated_connection() {
+        use std::io::Write;
+        let (address, _daemon) = serve_on_port_zero("secret");
+        let mut flood = connect(address);
+        let reply = authenticate(&mut flood, "secret");
+        assert!(reply.contains("\"result\""), "{reply}");
+
+        // Past the cap and never terminated. Were the line merely parsed as
+        // junk, the connection would answer and keep reading.
+        let payload = vec![b'x'; usize::try_from(MAX_LINE).unwrap() * 2];
+        let _ = flood.write_all(&payload);
+        read_until_closed(&mut flood)
+            .expect("an oversized line must end the connection");
+
+        // Everyone else is still served.
+        let mut healthy = connect(address);
+        let reply = authenticate(&mut healthy, "secret");
+        assert!(reply.contains("\"result\""), "{reply}");
+    }
+
+    #[test]
+    fn connections_beyond_the_cap_are_refused() {
+        let (address, daemon) = serve_on_port_zero("secret");
+        let held: Vec<_> = (0..MAX_CONNECTIONS).map(|_| connect(address)).collect();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while daemon.open.load(Ordering::Relaxed) < MAX_CONNECTIONS {
+            assert!(Instant::now() < deadline, "the daemon never served them");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut excess = connect(address);
+        let reply = read_until_closed(&mut excess)
+            .expect("a connection over the cap must be closed, not held open");
+        assert_eq!(reply, "", "a refused connection gets no reply");
+        assert_eq!(
+            daemon.open.load(Ordering::Relaxed),
+            MAX_CONNECTIONS,
+            "a refused connection must not take a slot"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn a_connection_must_authenticate_before_anything_else() {
+        use std::io::Write;
+        let (address, _daemon) = serve_on_port_zero("secret");
+        let mut stream = connect(address);
+        writeln!(stream, r#"{{"jsonrpc":"2.0","id":1,"method":"daemon.status"}}"#)
+            .expect("send");
+        let reply = read_until_closed(&mut stream).expect("closed after refusal");
+        assert!(reply.contains("`auth`"), "{reply}");
+        assert!(!reply.contains("\"result\""), "{reply}");
     }
 
     #[test]

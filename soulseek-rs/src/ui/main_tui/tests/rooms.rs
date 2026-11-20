@@ -162,3 +162,48 @@ fn page_up_scrolls_a_conversation_and_switching_chats_resets_it() {
     let screen = screen_of(&mut tui);
     assert!(screen.contains("msg 079"), "{screen}");
 }
+
+/// Control characters (C0, DEL, C1) other than the row separator the screen
+/// text adds itself.
+fn control_characters(screen: &str) -> Vec<char> {
+    screen
+        .chars()
+        .filter(|c| c.is_control() && *c != '\n')
+        .collect()
+}
+
+const HOSTILE: &str = "hi \x1b]0;pwned\x07 \x1b[2J \u{9b}31m \x7f end";
+
+#[test]
+fn a_room_message_cannot_put_control_sequences_on_the_terminal() {
+    let mut tui = attach(Arc::new(TalkativeSession::default()));
+    in_a_room(&mut tui, 1);
+    tui.state.rooms.apply_event(
+        soulseek_rs::RoomEvent::Message {
+            room: "jazz".to_string(),
+            username: "mallory\x1b[31m".to_string(),
+            message: HOSTILE.to_string(),
+        },
+        Some("jazz"),
+    );
+    let screen = screen_of(&mut tui);
+    assert!(screen.contains("hi "), "the message is still shown: {screen}");
+    assert!(screen.contains(" end"), "{screen:?}");
+    assert_eq!(control_characters(&screen), Vec::<char>::new(), "{screen:?}");
+}
+
+#[test]
+fn a_private_message_cannot_put_control_sequences_on_the_terminal() {
+    let mut tui = attach(Arc::new(TalkativeSession::default()));
+    tui.state.messages.push(crate::models::ChatMessage {
+        direction: MessageDirection::Incoming,
+        peer: "mallory\x1b]0;x\x07".to_string(),
+        text: HOSTILE.to_string(),
+        at: crate::time::Timestamp::now(),
+    });
+    tui.state.chat_peer = Some("mallory\x1b]0;x\x07".to_string());
+    tui.state.show_messages = true;
+    let screen = screen_of(&mut tui);
+    assert!(screen.contains("hi "), "the message is still shown: {screen}");
+    assert_eq!(control_characters(&screen), Vec::<char>::new(), "{screen:?}");
+}

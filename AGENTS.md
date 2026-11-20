@@ -43,6 +43,31 @@ cargo test
 
 The end-to-end suite needs a Soulseek server. Point `SOULFIND_BIN` at a
 [soulfind](https://github.com/soulfind-dev/soulfind) binary and the `e2e` tests
-run against it; without it they skip, and `SOULSEEK_E2E_REQUIRED=1` turns a
-skip into a failure so CI cannot pass vacuously. See `CONTRIBUTING.md` for the
-rest.
+run against it; without it they skip. `SOULSEEK_E2E_REQUIRED=1` turns a skip
+into a failure, but the pull request workflow does not set it. See
+`CONTRIBUTING.md` for the rest.
+
+## Verification
+
+- `make test` (CI: `.github/workflows/ci.yml`, on `pull_request` and pushes to
+  `main`): 1002 passed, 2 ignored; cold 251.87s, warm 27s to 64s on a busy
+  macOS host with four build jobs. `make lint` (`lint.yml`): cold 180.94s,
+  warm 39s to 86s, clippy on all targets with `-D warnings`.
+- Tiers (warm): unit about 770 tests (`soulseek-rs`, `soulseek-rs-lib`; 1s each); local-socket tests (daemon transport bounds in
+  `src/daemon/server`, `resume_e2e.rs`, `persist_e2e.rs`); server e2e 208 tests
+  (`cli_e2e`, `daemon_protocol_e2e`, `tui_e2e`, lib `e2e`: client and peer
+  protocol) that need soulfind
+  (`SOULFIND_BIN` or `soulfind/bin/soulfind`) and return early, counted as
+  passing, without it (SOUL-2). `make test` never reaches the real network.
+- CLI flags and exit codes: `soulseek-rs/tests/cli_e2e.rs` (soulfind), unit
+  tests in `src/output.rs` and `src/cli`. Daemon JSON-RPC, authentication and
+  framing limits: unit tests in `src/daemon/server`, plus `daemon_protocol_e2e.rs`.
+- TUI: window logic over a test backend in `src/ui`; terminal output of peer
+  text in `src/ui/tui/buffer.rs`; PTY frames in `tests/tui_snapshots.rs` need
+  `--features fixtures`, are not part of `make test`, and are stale (SOUL-5).
+- Performance workload: `soulseek-rs-lib/examples/stress.rs` requires a local
+  server; a repeatable local-server baseline has not been established.
+- Coverage and mutation tools (`cargo-llvm-cov`, `cargo-mutants`) are not
+  installed; new boundary tests are proven with a hand-injected fault.
+- Vendored IGD (`soulseek-rs/src/port_mapping/igd/`): https://github.com/dariusc93/rust-igd,
+  version 0.17.1, revision not recorded, modified here (commit `0737f12`).
