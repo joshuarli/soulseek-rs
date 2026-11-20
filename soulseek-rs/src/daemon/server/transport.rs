@@ -31,7 +31,7 @@ const WRITE_QUEUE_DEPTH: usize = 1024;
 /// The longest request line the daemon will read. Generous next to the largest
 /// real request (a `shares.set` naming every folder) and small enough that an
 /// unauthenticated peer cannot make the daemon allocate without bound.
-const MAX_LINE: u64 = 1 << 20;
+pub(super) const MAX_LINE: u64 = 1 << 20;
 
 /// How long an unauthenticated connection may stay silent. Applies only until
 /// `auth` succeeds — an established client is expected to idle, holding its
@@ -44,7 +44,7 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// How many control connections may be open at once. Far above any real use
 /// (a TUI, a few scripts, an agent), and low enough that an unauthenticated
 /// peer cannot exhaust the daemon's threads.
-const MAX_CONNECTIONS: usize = 64;
+pub(super) const MAX_CONNECTIONS: usize = 64;
 
 /// Where control connections arrive.
 ///
