@@ -43,6 +43,24 @@ cargo test
 
 The end-to-end suite needs a Soulseek server. Point `SOULFIND_BIN` at a
 [soulfind](https://github.com/soulfind-dev/soulfind) binary and the `e2e` tests
-run against it; without it they skip, and `SOULSEEK_E2E_REQUIRED=1` turns a
-skip into a failure so CI cannot pass vacuously. See `CONTRIBUTING.md` for the
-rest.
+run against it; without it they skip. `SOULSEEK_E2E_REQUIRED=1` turns a skip
+into a failure, but the pull request workflow does not set it. See
+`CONTRIBUTING.md` for the rest.
+
+## Verification
+
+- `make test`: cold 251.87s, warm 16.40s on a busy macOS host with four build
+  jobs; optional soulfind cases skipped. `make lint`: 180.94s cold, clippy on
+  all targets.
+- CLI flags and exit codes: `soulseek-rs/tests/cli_e2e.rs`; TUI rendering:
+  `soulseek-rs/tests/tui_snapshots.rs`.
+- Library client and peer protocol: `soulseek-rs-lib/tests/e2e.rs` needs a local
+  soulfind; `resume_e2e.rs` uses local sockets. The binary consumes the library.
+- Daemon JSON-RPC and authentication: `soulseek-rs/tests/daemon_protocol_e2e.rs`
+  needs a local soulfind. Configuration and state: `persist_e2e.rs`.
+- Components: `soulseek-rs-lib` protocol/client; `soulseek-rs` CLI, daemon,
+  persistence, port mapping and terminal UI.
+- Performance workload: `soulseek-rs-lib/examples/stress.rs` requires a local
+  server; a repeatable local-server baseline has not been established.
+- Vendored IGD: https://github.com/dariusc93/rust-igd, version 0.17.1,
+  subsequently modified in this repository.
