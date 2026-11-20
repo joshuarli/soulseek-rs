@@ -58,13 +58,13 @@ into a failure, but the pull request workflow does not set it. See
   (`cli_e2e`, `daemon_protocol_e2e`, `tui_e2e`, lib `e2e`: client and peer
   protocol) that need soulfind
   (`SOULFIND_BIN` or `soulfind/bin/soulfind`) and return early, counted as
-  passing, without it (DSLP-6). `make test` never reaches the real network.
+  passing, without it (SOUL-2). `make test` never reaches the real network.
 - CLI flags and exit codes: `soulseek-rs/tests/cli_e2e.rs` (soulfind), unit
   tests in `src/output.rs` and `src/cli`. Daemon JSON-RPC, authentication and
   framing limits: unit tests in `src/daemon/server`, plus `daemon_protocol_e2e.rs`.
 - TUI: window logic over a test backend in `src/ui`; terminal output of peer
   text in `src/ui/tui/buffer.rs`; PTY frames in `tests/tui_snapshots.rs` need
-  `--features fixtures`, are not part of `make test`, and are stale (DSLP-13).
+  `--features fixtures`, are not part of `make test`, and are stale (SOUL-5).
 - Performance workload: `soulseek-rs-lib/examples/stress.rs` requires a local
   server; a repeatable local-server baseline has not been established.
 - Coverage and mutation tools (`cargo-llvm-cov`, `cargo-mutants`) are not
