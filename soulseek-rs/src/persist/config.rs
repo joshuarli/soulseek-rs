@@ -422,17 +422,11 @@ mod tests {
     }
 
     #[test]
-    fn default_download_dir_is_a_soulseek_folder_under_downloads() {
+    fn default_download_dir_is_soulseek_folder_under_sync() {
         let resolved = resolve(&bare_cli(), &FileConfig::default());
         let path = std::path::Path::new(&resolved.download_dir);
         assert!(path.is_absolute(), "must not rely on ~ expansion");
-        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("Soulseek"));
-        assert_eq!(
-            path.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str()),
-            Some("Downloads")
-        );
+        assert!(path.ends_with("Sync/M/Soulseek"), "{path:?}");
     }
 
     #[test]

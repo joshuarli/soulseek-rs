@@ -517,7 +517,7 @@ fn a_config_driven_remote_client_reports_the_daemons_world() {
             |dir| dir.starts_with(std::env::temp_dir().to_str().unwrap())
         ),
         "the directory the bytes actually land in, on the daemon's host, not \
-         this machine's Downloads folder: {record:?}"
+         this machine's default folder: {record:?}"
     );
 }
 

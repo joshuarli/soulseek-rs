@@ -594,7 +594,7 @@ file, in that order of precedence. Flags work before or after the subcommand.
 | `--password`                   | `SOULSEEK_PASSWORD`                 | never stored in the file     | required                  |
 | `--password-cmd`               | `SOULSEEK_PASSWORD_CMD`             | `password_cmd`               | unset                     |
 | `--server`                     | `SOULSEEK_SERVER`                   | `server`                     | `server.slsknet.org:2416` |
-| `--download-dir`               | `SOULSEEK_DOWNLOAD_DIR`             | `download_dir`               | `<Downloads>/Soulseek`    |
+| `--download-dir`               | `SOULSEEK_DOWNLOAD_DIR`             | `download_dir`               | `~/Sync/M/Soulseek`       |
 | `--shared-dir` (repeatable)    | `SOULSEEK_SHARED_DIR`               | `shared_dir` / `shared_dirs` | the download dir          |
 | `--listener-port`              | `SOULSEEK_LISTENER_PORT`            | `listener_port`              | `2234`                    |
 | `--no-listener` / `--listener` | `SOULSEEK_NO_LISTENER`              | `disable_listener`           | listener on               |

@@ -484,7 +484,7 @@ fn run_default_tui(
         parse_server_address(&resolved.server).map_err(CliError::usage)?;
 
     // Make sure the download folder exists up front: first-run defaults point
-    // download and shared at the same fresh Downloads/Soulseek folder, and
+    // download and shared at the same fresh ~/Sync/M/Soulseek folder, and
     // shared-directory validation requires an existing path.
     if let Err(e) = std::fs::create_dir_all(&resolved.download_dir) {
         out.warn(&format!(

@@ -64,20 +64,15 @@ fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("", "", "soulseek-rs")
 }
 
-/// Default download (and shared) folder: a `Soulseek` subfolder of the
-/// platform Downloads directory (XDG on Linux), so Soulseek files don't
-/// clutter the Downloads root.
+/// Default download (and shared) folder: `~/Sync/M/Soulseek`, keeping Soulseek
+/// files inside the synced `Sync` tree.
 #[must_use]
 pub fn default_download_dir() -> String {
-    let user_dirs = directories::UserDirs::new();
-    let downloads = user_dirs
-        .as_ref()
-        .and_then(|dirs| dirs.download_dir().map(std::path::Path::to_path_buf))
-        .or_else(|| {
-            user_dirs
-                .as_ref()
-                .map(|dirs| dirs.home_dir().join("Downloads"))
+    let relative = std::path::Path::new("Sync/M/Soulseek");
+    directories::UserDirs::new()
+        .map_or_else(|| relative.to_path_buf(), |dirs| {
+            dirs.home_dir().join(relative)
         })
-        .unwrap_or_else(|| std::path::PathBuf::from("Downloads"));
-    downloads.join("Soulseek").display().to_string()
+        .display()
+        .to_string()
 }
