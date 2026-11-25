@@ -47,6 +47,12 @@ run against it; without it they skip. `SOULSEEK_E2E_REQUIRED=1` turns a skip
 into a failure, but the pull request workflow does not set it. See
 `CONTRIBUTING.md` for the rest.
 
+## Current work
+
+The single active plan, including the networking completion campaign, is
+[`docs/roadmap.md`](docs/roadmap.md). Resume from its **Status**; do not create
+a separate campaign document.
+
 ## Verification
 
 `make clean` removes this checkout’s build output in `./target`. It refuses symlinks and ordinary files at those paths.
