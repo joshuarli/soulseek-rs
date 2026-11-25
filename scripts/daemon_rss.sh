@@ -45,7 +45,7 @@ cleanup() {
 on_signal() {
     cleanup
     trap - INT TERM
-    kill -INT "$$"
+    kill -"$1" "$$"
 }
 trap cleanup 0
 trap 'on_signal INT' INT
@@ -106,7 +106,7 @@ while [ "$i" -lt 200 ]; do
         break
     fi
     i=$((i + 1))
-    sleep 0.1
+    "$HELPER" nap 0.1
 done
 if [ "$i" -ge 200 ] || ! kill -0 "$LOAD_PID" 2>/dev/null; then
     printf 'daemon-rss: daemons never became ready\n' >&2

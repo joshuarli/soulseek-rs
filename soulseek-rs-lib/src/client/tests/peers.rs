@@ -336,15 +336,16 @@ fn an_active_login_wait_ends_when_stop_is_set() {
     });
     client.connect().expect("connect");
     let stop = Arc::new(AtomicBool::new(false));
-    {
+    let setter = {
         let stop = Arc::clone(&stop);
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
             stop.store(true, Ordering::Relaxed);
-        });
-    }
+        })
+    };
     let started = Instant::now();
     let result = client.login_with_stop(&stop);
+    setter.join().expect("the stop setter did not panic");
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "stop must cancel the login wait instead of waiting for the server"

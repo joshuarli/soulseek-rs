@@ -795,7 +795,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_fifo_swapped_in_after_indexing_is_rejected_before_a_deadline() {
-        use std::sync::mpsc;
         use std::thread;
         use std::time::Duration;
 
@@ -804,21 +803,23 @@ mod tests {
         std::fs::remove_file(root.join("top.mp3")).unwrap();
         mkfifo(&root.join("top.mp3"));
 
-        let (tx, rx) = mpsc::channel();
         let target = file.clone();
-        drop(thread::spawn(move || {
-            let _ = tx.send(open_contained(&target).map(|_| ()));
-        }));
-        // Do not join on timeout: joining a worker wedged in a blocking open
-        // would turn this deadline test into a hang when the production fix
-        // regresses. The detached worker dies with the test process.
-        match rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(result) => assert_eq!(
-                result.expect_err("a FIFO is not the indexed file").kind(),
-                std::io::ErrorKind::InvalidData
-            ),
-            Err(error) => panic!("opening a FIFO wedged past the deadline: {error}"),
+        let worker = thread::spawn(move || open_contained(&target).map(|_| ()));
+        // Wait for the worker to finish before joining it: a join on a worker
+        // wedged in a blocking open would turn a regression into a hang.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !worker.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
         }
+        assert!(
+            worker.is_finished(),
+            "opening a FIFO wedged past the deadline"
+        );
+        let outcome = worker.join().expect("the opening thread did not panic");
+        assert_eq!(
+            outcome.expect_err("a FIFO is not the indexed file").kind(),
+            std::io::ErrorKind::InvalidData
+        );
 
         let before = open_fd_count();
         for _ in 0..64 {

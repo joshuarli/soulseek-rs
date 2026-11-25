@@ -208,6 +208,9 @@ def report(
     binary_record: Path,
 ) -> None:
     """Write the machine-readable measurement envelope to `output`."""
+    fixture_bytes = sum(
+        path.stat().st_size for path in (work / "seed-share").iterdir()
+    )
     rows: list[tuple[int, int]] = []
     for line in (work / "samples.txt").read_text(encoding="utf-8").splitlines():
         parts = line.split()
@@ -221,7 +224,7 @@ def report(
             "operations_succeeded": operations,
             "operations_required": rounds * 4,
             "operations_per_round": ["search", "browse", "download", "upload"],
-            "distinct_fixture_bytes": 30,
+            "distinct_fixture_bytes": fixture_bytes,
             "verified_in_both_directions": True,
             "server_port": server_port,
         },
@@ -254,6 +257,9 @@ def main(args: list[str]) -> int:
     """Dispatch the shell script's helper commands."""
     if args == ["ports"]:
         print(*free_ports(3))
+        return 0
+    if len(args) == 2 and args[0] == "nap":
+        time.sleep(float(args[1]))
         return 0
     if len(args) == 4 and args[0] == "ready":
         return 0 if ready(args[1], int(args[2]), float(args[3])) else 1

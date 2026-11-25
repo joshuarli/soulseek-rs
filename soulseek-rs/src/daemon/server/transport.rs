@@ -65,8 +65,15 @@ impl ListenerWakeup {
         let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
         let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
         for fd in [&read, &write] {
-            // SAFETY: `fd` is an owned descriptor from the pipe above.
-            unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+            // SAFETY: `fd` is an owned descriptor from the pipe above. A
+            // blocking wake pipe would strand shutdown in the drain loop, so
+            // a failure here must stop the listener before it starts.
+            if unsafe {
+                libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK)
+            } == -1
+            {
+                return Err(std::io::Error::last_os_error());
+            }
         }
         Ok((Self { write: Arc::new(write) }, read))
     }

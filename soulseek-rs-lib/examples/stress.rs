@@ -860,8 +860,11 @@ fn write_result(
     peak_threads: u64,
     peak_rss_kib: u64,
 ) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("stress: cannot create {}: {e}", parent.display());
+        return;
     }
     let parts = score
         .parts
@@ -878,7 +881,7 @@ fn write_result(
          \"downloads_completed\": {},\n    \"uploads_completed\": {},\n    \
          \"searches_answered\": {},\n    \"browses_answered\": {},\n    \
          \"bytes\": {},\n    \"peak_threads\": {},\n    \"peak_rss_kib\": {}\n  }}\n}}\n",
-        git_revision(),
+        git_revision().expect("a git revision for the evidence"),
         score.total,
         parts,
         cfg.peers,
@@ -898,7 +901,9 @@ fn write_result(
         peak_threads,
         peak_rss_kib,
     );
-    let _ = std::fs::write(path, body);
+    if let Err(e) = std::fs::write(path, body) {
+        eprintln!("stress: cannot write {}: {e}", path.display());
+    }
 }
 
 fn read_baseline(path: &Path) -> Option<f64> {
@@ -921,8 +926,11 @@ fn write_baseline(
     m: &Metrics,
     peak_rss_kib: u64,
 ) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("stress: cannot create {}: {e}", parent.display());
+        return;
     }
     let parts = score
         .parts
@@ -936,7 +944,7 @@ fn write_baseline(
          \"leechers\": {},\n    \"browses\": {},\n    \"file_bytes\": {}\n  }},\n  \
          \"observed\": {{\n    \"downloads_completed\": {},\n    \
          \"uploads_completed\": {},\n    \"bytes\": {},\n    \"peak_rss_kib\": {}\n  }}\n}}\n",
-        git_revision(),
+        git_revision().expect("a git revision for the evidence"),
         score.total,
         parts,
         cfg.peers,
@@ -950,7 +958,9 @@ fn write_baseline(
         Metrics::get(&m.bytes_downloaded) + Metrics::get(&m.bytes_uploaded),
         peak_rss_kib,
     );
-    let _ = std::fs::write(path, body);
+    if let Err(e) = std::fs::write(path, body) {
+        eprintln!("stress: cannot write {}: {e}", path.display());
+    }
 }
 
 /// Peak resident set size in KiB. Supported pairs are macOS (bytes) and Linux
@@ -983,16 +993,15 @@ fn peak_rss_kib() -> u64 {
     }
 }
 
-fn git_revision() -> String {
-    Command::new("git")
+fn git_revision() -> Option<String> {
+    let out = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map_or_else(
-            || "unknown".into(),
-            |out| String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        )
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok().map(|s| s.trim().to_string())
 }
 
 /// Live thread count for this process, so the harness can show whether load is
