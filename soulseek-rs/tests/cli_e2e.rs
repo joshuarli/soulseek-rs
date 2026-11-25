@@ -8,6 +8,9 @@
 //! sibling `soulfind/bin/soulfind` checkout) it spawns one, otherwise it skips
 //! with a notice. `SOULSEEK_E2E_REQUIRED=1` turns a missing server into a
 //! failure, which is how CI guarantees these actually run.
+//!
+//! `SOULSEEK_E2E_MODE=daemon` drives the same suite through a daemon. That
+//! pass is opt-in and is not part of the canonical path.
 
 mod common;
 
@@ -99,10 +102,10 @@ fn isolated_state_dir() -> PathBuf {
 
 /// Which kind of session the suite drives.
 ///
-/// The point of the switch is that the *same* tests run both ways: identical
-/// records, identical exit codes, whether the session is this process's own or
-/// a daemon's. CI runs the suite twice, once per mode, and that equivalence is
-/// the guarantee daemon mode rests on.
+/// The switch is opt-in: `SOULSEEK_E2E_MODE=daemon` drives the same command
+/// surface through a daemon. The canonical `make test` and CI runs stay in
+/// local mode, and the daemon-only tests below skip there. There is no
+/// canonical local/daemon equivalence pass.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Mode {
     Local,
@@ -889,9 +892,9 @@ fn probe_bytes() -> Vec<u8> {
 /// In daemon mode the same call is served by a daemon instead. The flags that
 /// shape a *session* rather than a command — shares, the listener, where
 /// downloads land — are handed to the daemon rather than the client, because
-/// that is where they now belong. The test itself does not change, which is
-/// the whole point: if the records and exit code come out the same either way,
-/// daemon mode is equivalent.
+/// that is where they now belong. The test itself does not change, so an
+/// opt-in daemon run applies the same expectations as a local one. No
+/// canonical pass compares the two modes.
 fn cli(server: &TestServer, user: &str, args: &[&str]) -> Output {
     let (session_flags, command_args) = match mode() {
         // Locally a flag is a flag: the run configures its own session.
@@ -3428,10 +3431,11 @@ fn concurrent_downloads_sharing_a_listener_port_all_land() {
 // ---------------------------------------------------------------------------
 // Daemon mode
 //
-// Everything above proves a command behaves the same whichever kind of session
-// serves it. These prove the things that only exist *because* there is a
-// daemon: one session shared by several clients at once, the remote transport
-// and its token, and the gate that decides who may talk to it at all.
+// The tests above are written to run against either session kind, but the
+// canonical path drives only a local one. These cover what exists only
+// *because* there is a daemon: one session shared by several clients at once,
+// the remote transport and its token, and the gate that decides who may talk
+// to it at all. They run in an opt-in daemon-mode pass.
 // ---------------------------------------------------------------------------
 
 /// Two clients, one session, at the same time.
@@ -3738,7 +3742,7 @@ fn setting_the_download_folder_takes_effect_on_a_running_daemon() {
 }
 
 /// The configured `download_dir` is where a download lands when no flag names
-/// one — the local half of the promise the daemon test above makes.
+/// one, in the local session the canonical path drives.
 #[test]
 fn a_download_lands_in_the_folder_the_config_names() {
     if mode() != Mode::Local {

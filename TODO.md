@@ -64,15 +64,6 @@ Next: 23
 - **Fix with:** durable-state
 - **Effort:** M
 
-### SOUL-18 · P2 · The canonical test path does not run the daemon-mode CLI equivalence pass
-
-- **Area:** Test strategy
-- **Where:** soulseek-rs/tests/cli_e2e.rs:100-117,3443-3447,3500-3504,3576-3582; Makefile:13-16; .github/workflows/ci.yml:54-59
-- **Problem:** cli_e2e is designed to run the same command surface in local and daemon modes, but SOULSEEK_E2E_MODE defaults to local and neither make test nor the server-backed CI job runs a daemon-mode pass. Daemon-only coverage for multiple clients sharing one session, daemon status or stop behavior, and live share updates returns early in the canonical path despite the test mode already existing. Proven by the mode gate and workflow.
-- **Recommendation:** Run the existing daemon-mode pass in the canonical server-backed verification or explicitly withdraw the local/daemon equivalence guarantee. Do not add a parallel suite; select the mode that already exists.
-- **Fix with:** test-audit
-- **Effort:** S
-
 ### SOUL-20 · P2 · Transfer direction is flattened into an unconditional download accept path
 
 - **Area:** Peer protocol correctness
