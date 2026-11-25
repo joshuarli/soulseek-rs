@@ -35,9 +35,10 @@ baseline ratchets upward. Without `--save` a run just prints the delta.
 ## The gate
 
 `STRESS_REQUIRE_FUNCTIONAL=1` makes the run exit 1 when any of the four
-functional dimensions is below 100%. CI runs it that way on every pull request
-with an eighth of the default load; throughput never fails the gate because it
-measures the machine, not the client.
+functional dimensions is below 100%; `make bench` is the local entrypoint and
+requires `SOULFIND_BIN`. CI does **not** run the stress workload: it needs a
+local server and measures the machine as much as the client, so throughput is
+never a gate.
 
 ## Tuning the load
 

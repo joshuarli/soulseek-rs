@@ -226,7 +226,9 @@ being served before blaming the network.
 **`config set <key> <value>`** — `key`, `value`.
 
 **`portmap`** — `ok`, `backend`, `external`, `port`. Exit 4 when no router
-answered, which is a negative answer rather than an error.
+answered, which is a negative answer rather than an error. This command
+**actively creates and then removes** a router mapping; it is not passive, and
+it is separate from the session's `port_mapping` setting (off by default).
 
 **`skills install`**, **`skills uninstall`**, and **`skills list`** — write
 this skill file into the local agent directories, or remove it: `agent`,
@@ -523,7 +525,9 @@ reach for `--username` to get around it: that registers an account per track on
 someone else's server. Start the daemon first.
 
 Keep the listener on: a peer that cannot connect back to you cannot send you
-the file.
+the file. Router mapping is independent and off by default; opt in with
+`--port-mapping auto|upnp|natpmp` or `config set port_mapping …` only when you
+want the router contacted. Without it, firewalled peers may be unreachable.
 
 ## Rules
 

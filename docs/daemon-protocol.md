@@ -26,7 +26,7 @@ once.
 | Transport | Address | Authentication |
 |---|---|---|
 | Unix socket | `<state-dir>/daemon.sock`, mode 0600 | The socket's permissions. `token` may be omitted. |
-| TCP | opt-in via `daemon --bind ADDR` | The token in `<state-dir>/daemon.token`, mode 0600. |
+| TCP | opt-in via `daemon --bind 127.0.0.1:PORT`; non-loopback binds are refused before listening | The token in `<state-dir>/daemon.token`, mode 0600. |
 
 The local socket is the Docker and ssh-agent bargain: if the operating system
 let you open it, you are the user who started the daemon, and there is nothing
@@ -39,8 +39,11 @@ sleep one second. The token is 256 bits from the OS, generated on first start
 and reused across restarts so existing clients keep working;
 `soulseek-rs daemon token` prints it.
 
-There is no transport encryption. Binding non-loopback TCP means putting SSH
-or a TLS-terminating proxy in front of it.
+There is no transport encryption and this build has no TLS support. Plaintext
+TCP is loopback-only: a non-loopback `--bind` is rejected with a clear error
+before the listener opens. Reach a loopback bind from another machine over an
+encrypted tunnel (for example SSH port forwarding). Native Soulseek protocol
+traffic is a separate transport and is not encrypted by this choice.
 
 `<state-dir>` is `$SOULSEEK_STATE_DIR`, else the platform data directory
 (`~/.local/share/soulseek-rs/state` on Linux and macOS).

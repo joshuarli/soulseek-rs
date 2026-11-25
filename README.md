@@ -38,8 +38,9 @@ enthusiasts to share niche music. This repository is that client plus
   filter by bitrate, size, file type, free slots, or terms to exclude
 - **Wishlist**: `wish add` what nobody has today; `wish run` and
   `serve --wishlist` keep looking on the interval the server sets
-- **Sharing**: `shares add` a directory and your files show up in searches,
-  with `serve` online so peers can browse and download them
+- **Sharing**: on by default — the dedicated `~/Sync/M/Soulseek` download folder
+  is shared; `shares add` adds roots and `serve` keeps the index and uploads
+  alive
 - **Upload queue**: a slot cap, server-listed privileged users first, and a
   truthful answer when a peer asks their place in line
 - **Browse**: list any user's shared files and download straight from the tree
@@ -51,8 +52,8 @@ enthusiasts to share niche music. This repository is that client plus
 - **Private messages**: send and receive, with an inbox in the TUI
 - **Firewalled peers**: browsing and downloads fall back to server-brokered
   connections when a peer is unreachable directly
-- **Automatic port mapping**: UPnP-IGD and NAT-PMP, with `portmap` to test your
-  router
+- **Optional router mapping**: off by default; opt into UPnP-IGD, NAT-PMP or
+  both with `port_mapping`, and use `portmap` for an active diagnostic probe
 - **TUI and CLI**: every feature reachable without a terminal, records on
   stdout, the exit code saying what happened
 - **Daemon mode**: one login several clients share, locally or over the network,
@@ -598,6 +599,7 @@ file, in that order of precedence. Flags work before or after the subcommand.
 | `--shared-dir` (repeatable)    | `SOULSEEK_SHARED_DIR`               | `shared_dir` / `shared_dirs` | the download dir          |
 | `--listener-port`              | `SOULSEEK_LISTENER_PORT`            | `listener_port`              | `2234`                    |
 | `--no-listener` / `--listener` | `SOULSEEK_NO_LISTENER`              | `disable_listener`           | listener on               |
+| `--port-mapping POLICY`        | `SOULSEEK_PORT_MAPPING`             | `port_mapping`               | `off`                     |
 | —                              | —                                   | `accept_children`            | off                       |
 | —                              | —                                   | `use_username_dirs`          | off                       |
 | `--max-concurrent-downloads`   | `SOULSEEK_MAX_CONCURRENT_DOWNLOADS` | `max_concurrent_downloads`   | `20`                      |
@@ -621,11 +623,11 @@ to them. It is off by default — each child costs a socket and a copy of the
 network's whole search stream — and it needs the listener, since a child has to
 be able to dial in.
 
-`config get` and `config set` cover the thirteen settings the file holds
-(`username`, `server`, `listener_port`, `disable_listener`, `accept_children`,
-`download_dir`, `use_username_dirs`, `shared_dirs`, `max_concurrent_downloads`,
-`search_timeout`, `password_cmd`, `daemon`, `daemon_token`), and list them back at you when you
-name something
+`config get` and `config set` cover the fourteen settings the file holds
+(`username`, `server`, `listener_port`, `disable_listener`, `port_mapping`,
+`accept_children`, `download_dir`, `use_username_dirs`, `shared_dirs`,
+`max_concurrent_downloads`, `search_timeout`, `password_cmd`, `daemon`,
+`daemon_token`), and list them back at you when you name something
 else. An empty string clears a key, and `shared_dirs` takes a comma-separated
 list. Waits expressed in seconds (`--search-timeout`, `--timeout`,
 `--duration`) are bounded to one day, so a mistyped flag is rejected rather
@@ -693,30 +695,70 @@ files (under a filter, only the ones it shows).
 ### Connectivity
 
 Browsing and downloading are peer-to-peer, so one side has to accept an incoming
-connection. With the listener on (the default) the client opens its listen port
-via **UPnP-IGD** and **NAT-PMP**, renews it while running, and removes it on
-exit. Best-effort: a router with both disabled makes it a no-op, and a log line
-says to forward the port yourself.
+connection. The **peer listener is on by default**; router mapping is a
+separate, **off-by-default** decision:
 
-- The port is `--listener-port` (`SOULSEEK_LISTENER_PORT`, default `2234`).
-  Forward that TCP port when auto-mapping cannot get it.
-- `--no-listener` turns the listener and port mapping off; `--listener` forces
-  it on when the config file disables it.
-- When another process already holds the port, the usual case with several
-  one-shot commands at once, the client takes one the OS picks, says so on
-  stderr, and advertises that one. `whoami` reports what it really holds.
+- `port_mapping = "off"` (the default), `--port-mapping off`, or
+  `SOULSEEK_PORT_MAPPING=off`: no discovery, no mapping, no renewal worker, no
+  backend fallback. Older config files without the key get this default.
+- `port_mapping = "auto"`: try UPnP-IGD first, then NAT-PMP only if UPnP did not
+  produce a usable mapping.
+- `port_mapping = "upnp"` or `"natpmp"`: use only that backend. Selecting one
+  never contacts the other.
+- Enabling mapping while disabling the listener (`--no-listener` or
+  `disable_listener = true`) is a configuration error, rejected before anything
+  opens a socket. Mapping off with the listener off is fine.
+
+The listener and mapping are independent: with mapping off the listener still
+binds, sharing still works, and server-brokered reverse connections still
+happen. Mappings are finite leases renewed while the session lives and removed
+on a clean shutdown; a crash cannot be relied on to remove them. Only the port
+the listener **actually bound** is mapped, so an occupied configured port is
+never forwarded to whoever took it. A refused finite lease or a grant of a
+different external port is rejected and cleaned up rather than silently turned
+into a permanent or unadvertised mapping.
+
+```bash
+soulseek-rs --port-mapping auto serve --follow
+soulseek-rs config set port_mapping upnp
+```
+
+- The port is `--listener-port` (`SOULSEEK_LISTENER_PORT`, default `2234`);
+  forward it manually if you leave mapping off.
+- `--no-listener` disables only the peer listener; `--listener` forces it back
+  on when the config file disables it.
+- When another process already holds the port, the client takes one the OS
+  picks, says so on stderr, and advertises that one. `whoami` reports what it
+  really holds.
+
+`portmap` is an explicit diagnostic and **actively creates a temporary router
+mapping, then removes it** (UPnP first, then NAT-PMP). It does not read the
+session's `port_mapping` and is not a passive check:
 
 ```bash
 soulseek-rs portmap            # exits 0 when mapping works, 4 when it does not
 soulseek-rs portmap --json     # {"ok":true,"backend":"upnp","external":"…"}
 ```
 
-`portmap` opens the port, reports whether the router allowed it and your
-external address, then removes the test mapping. The verdict is the exit code,
-so `soulseek-rs portmap || notify-me` works as a health check.
-
 Two peers both behind routers with no forwarded port cannot browse each other.
-That is a Soulseek limitation, not a bug.
+Mapping off does not guarantee reachability either way: it is a Soulseek
+network limitation, not a bug. See the [network contract](docs/network-contract.md)
+for every connection class, its trigger and its limits.
+
+### Resource limits
+
+Conservative defaults keep a laptop predictable. The library caps established
+peer control connections at 512, accepted half-finished handshakes at 128
+(refused, not queued, when full), distributed parent candidates at 10 with one
+parent, optional children at 10, upload slots at 10, queued uploads at 1024
+(16 per peer), pending brokered connects at 256, pending upload serves at 256
+(64 per peer), and each message
+buffer at 16 MiB. Searches admitted from the parent or the server are budgeted
+at 50/s each. Downloads and uploads have bounded dial/read/write deadlines and
+are cancelled on shutdown; daemon control allows 64 clients with 1024-entry
+event and writer queues and a 1 MiB frame cap. See
+[the network contract](docs/network-contract.md) for the per-class table and
+tuning notes.
 
 ## Development
 
@@ -755,8 +797,15 @@ SOULFIND_BIN=/path/to/soulfind/bin/soulfind \
 > Homebrew's SQLite instead; no patching needed.
 
 Set `SOULSEEK_E2E_REQUIRED=1` to turn a missing server into a hard failure
-instead of a skip. CI sets it, so the e2e suite runs against a freshly built
-soulfind instead of skipping.
+instead of a skip. The `integration` job in `ci.yml` builds soulfind from
+source and sets it, so those suites really execute there; a plain `make test`
+on a machine without soulfind still skips them and must not be read as
+integration coverage.
+
+```bash
+SOULSEEK_E2E_REQUIRED=1 SOULFIND_BIN=/path/to/soulfind/bin/soulfind make test
+make bench   # mixed-load stress workload; needs SOULFIND_BIN, never runs in CI
+```
 
 ### Continuous integration
 

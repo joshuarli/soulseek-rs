@@ -1,23 +1,21 @@
 Prefix: SOUL
 Next: 9
 
-### SOUL-2 · P3 · Make skipped server scenarios visible in CI
+## Working checklist — conservative networking campaign
 
-- **Area:** verification · server scenarios
-- **Where:** .github/workflows/ci.yml; soulseek-rs-lib/tests/e2e.rs:208; README.md:757
-- **Problem:** The pull request workflow runs make test without a local soulfind or SOULSEEK_E2E_REQUIRED. Server-dependent tests return early and are counted as passing; README claims CI supplies the server. With SOULFIND_BIN pointing to a missing path, connect_and_login_succeed reports a skip and exits successfully.
-- **Recommendation:** Provide a local server in an authorized CI change and require it, or explicitly report the missing scenario coverage; correct the CI description alongside that change.
-- **Fix with:** test-pyramid
-- **Effort:** M
-
-### SOUL-3 · P3 · Daemon token file is world-readable until chmod
-
-- **Area:** security · daemon token
-- **Where:** soulseek-rs/src/daemon/mod.rs:load_or_create_token
-- **Problem:** The token is written with std::fs::write (mode from the umask) and restricted to 0600 afterwards, leaving a window in which another local user can read the control token. persist/secret.rs already creates its file with mode 0600 and renames it into place.
-- **Recommendation:** Create the file with OpenOptions mode 0o600 (create_new) as secret.rs does; test the mode of a fresh token.
-- **Fix with:** os-boundaries
-- **Effort:** S
+- [x] Mapping policy (`off`/`auto`/`upnp`/`natpmp`) wired through CLI, env,
+      file, help, completions and all session entry points; `off` starts no
+      worker; invalid combinations rejected before sockets open.
+- [x] Default sharing and peer listener preserved; share roots confined at
+      file-open time; `.part` files excluded.
+- [x] Resource bounds added/refreshed: frame buffer cap, handshake refusal,
+      queue caps, pending-serve TTL, search budgets, reconnect stop.
+- [x] Daemon control kept local; non-loopback plaintext TCP refused; token
+      created 0600 atomically; socket mode tested.
+- [x] Docs, network contract, CI server-backed job, `make bench` target.
+- [ ] Server-backed verification on this host: no soulfind/D toolchain
+      available (CI job added; local run blocked).
+- [ ] Independent-client (Nicotine+) interoperability: not available locally.
 
 ### SOUL-4 · P3 · Bidirectional overrides in peer text can reorder what the terminal shows
 
@@ -37,15 +35,6 @@ Next: 9
 - **Fix with:** test-pyramid
 - **Effort:** M
 
-### SOUL-6 · P3 · Stress benchmark needs a local soulfind and has no make entrypoint
-
-- **Area:** verification · bench
-- **Where:** scripts/stress.sh; benchmarks/README.md; Makefile
-- **Problem:** The only benchmark (scripts/stress.sh, a mixed-load score out of 100 against benchmarks/stress-baseline.json at 97.78) spawns a local soulfind that is not installed on this host, so neither an Edit-size nor a Change-size run could be proven. The Makefile has no bench target, and CI never runs it. The score covers the library under peer load only.
-- **Recommendation:** Where soulfind is available, add make bench running scripts/stress.sh and prove it at one Edit and one Change workload; never run the full profile in CI.
-- **Fix with:** bench-pyramid
-- **Effort:** S
-
 ### SOUL-7 · P3 · No benchmark for the TUI frame path or peer message parsing
 
 - **Area:** verification · bench
@@ -55,11 +44,3 @@ Next: 9
 - **Fix with:** bench-pyramid
 - **Effort:** M
 
-### SOUL-8 · P3 · Port mapping follows any address named in an SSDP reply
-
-- **Area:** security · port mapping
-- **Where:** soulseek-rs/src/port_mapping/igd/common/parsing.rs (parse_location); soulseek-rs/src/port_mapping/igd/search.rs
-- **Problem:** Discovery fetches the description from the host:port in the LOCATION header of whichever datagram arrives first, not from the address that sent it, and a bad datagram aborts the search with ? instead of being skipped. A LAN host can steer the client's HTTP requests to another address or end discovery early.
-- **Recommendation:** Take the gateway address from the datagram's source (recv_from) and accept only a LOCATION that names it; continue past an unparsable reply.
-- **Fix with:** security
-- **Effort:** S

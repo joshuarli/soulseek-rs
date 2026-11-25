@@ -36,7 +36,8 @@ soulseek-rs room list|say|users|listen
 soulseek-rs message send|read
 soulseek-rs shares list|add|remove|status|reindex
 soulseek-rs config path|list|get|set
-soulseek-rs portmap                       # test automatic port mapping
+soulseek-rs --port-mapping auto serve     # opt in to UPnP then NAT-PMP mapping
+soulseek-rs portmap                       # actively probe and undo a mapping
 soulseek-rs completions install           # tab completion for bash/zsh/fish
 ```
 

@@ -5,7 +5,7 @@ TARGET_ENV := $(shell printf '%s' "$(TARGET)" | tr '[:lower:]-' '[:upper:]_')
 CARGO_CMD  := $(if $(findstring -linux-musl,$(TARGET)),$(shell command -v musl-cargo 2>/dev/null || printf cargo),cargo)
 cargo = $(if $(findstring -linux-musl,$(TARGET)),,$(if $(filter release-static,$(1)),RUSTFLAGS="-Cpanic=abort")) MUSL_TARGET="$(TARGET)" MUSL_BUILD_MODE="$(1)" $(CARGO_CMD)
 
-.PHONY: build test check lint release verify-release
+.PHONY: build test check lint bench release verify-release
 
 build:
 	$(call cargo,dev) build
@@ -21,6 +21,12 @@ check:
 
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
+
+# The mixed-load stress workload needs a local soulfind; it is deliberately
+# not part of make test or CI. Point SOULFIND_BIN at a server first.
+bench:
+	@mkdir -p .work/tmp
+	TMPDIR="$(CURDIR)/.work/tmp" ./scripts/stress.sh
 
 release:
 	$(call cargo,release-static) clean -p $(NAME) --profile dist --target $(TARGET)
