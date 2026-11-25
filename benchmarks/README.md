@@ -1,4 +1,19 @@
-# Concurrency benchmark
+# Benchmarks
+
+## Frame draw and message parse
+
+Two deterministic benchmarks cover the paths the mixed-load workload cannot
+attribute: a full-window draw of the 120x40 fixture session through
+`TestBackend`, and a parse of a captured `FileSearchResponse` frame. Each runs a
+fixed number of iterations, reports the median of 21 batches in ns/iter, and
+needs no server. Neither is part of `make test` or CI.
+
+```sh
+cargo bench -p soulseek-rs-lib --bench message_parse
+cargo bench -p soulseek-rs --features fixtures --bench tui_frame
+```
+
+## Concurrency benchmark
 
 Answers one question: how much simultaneous Soulseek activity can the client
 absorb before it starts losing work?

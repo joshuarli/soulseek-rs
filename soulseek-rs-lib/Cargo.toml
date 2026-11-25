@@ -24,3 +24,8 @@ libc = "0.2.189"
 [[example]]
 name = "stress"
 test = true
+
+[[bench]]
+name = "message_parse"
+harness = false
+test = false

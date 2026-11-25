@@ -33,6 +33,12 @@ name = "tui-fixture"
 path = "src/bin/tui_fixture.rs"
 required-features = ["fixtures"]
 
+[[bench]]
+name = "tui_frame"
+harness = false
+test = false
+required-features = ["fixtures"]
+
 [lints]
 workspace = true
 
