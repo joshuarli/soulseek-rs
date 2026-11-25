@@ -22,11 +22,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use igd::{PortMappingProtocol, SearchOptions, search_gateway};
+use nat_pmp::MapResponse;
 use soulseek_rs::utils::logger::{self, LogLevel};
 
 const MAPPING_DESCRIPTION: &str = "soulseek-rs";
-/// Lease we request; both backends renew at half this interval.
+/// Lease we request; both backends renew at half the granted interval.
 const LEASE_SECS: u32 = nat_pmp::RECOMMENDED_LIFETIME;
+/// A lease at or below this cannot be renewed before it expires.
+const MIN_RENEW_SECS: u32 = 30;
 /// Interactive NAT-PMP retransmit budget (~3.75s worst case), not the full 9.
 const NATPMP_ATTEMPTS: u32 = 4;
 
@@ -149,7 +152,7 @@ pub fn probe(port: u16) -> Probe {
     }
 
     match map_once(local_ip, port, MappingPolicy::Auto) {
-        Some((backend, _lease)) => {
+        Some((backend, _delay)) => {
             let (name, external) = match &backend {
                 Backend::Upnp { gateway, .. } => (
                     "upnp",
@@ -228,7 +231,7 @@ fn run(port: u16, policy: MappingPolicy, stop: &AtomicBool) {
         None
     };
 
-    let Some((backend, lease)) = map_once(local_ip, port, policy) else {
+    let Some((mut backend, delay)) = map_once(local_ip, port, policy) else {
         warn(&format!(
             "port mapping ({policy}) unavailable for port {port}; browsing/\
              downloading firewalled peers may fail unless you forward TCP \
@@ -241,36 +244,48 @@ fn run(port: u16, policy: MappingPolicy, stop: &AtomicBool) {
         remove(&backend);
         return;
     }
-    manage(&backend, lease, port, stop);
+    manage(&mut backend, delay, port, stop, sleep_until);
 }
 
-/// Renew `backend`'s mapping until `stop`, then remove it. Renews at half the
-/// granted lease, floored at 30s so a pathologically short lease can't spin us
-/// into a hot re-map loop.
-fn manage(backend: &Backend, lease: u32, port: u16, stop: &AtomicBool) {
-    let renew_after = Duration::from_secs(u64::from((lease / 2).max(30)));
+/// Half the granted lease, floored at 30s so a short lease cannot spin the
+/// mapper into a hot re-map loop.
+fn renewal_delay(lease: u32) -> Duration {
+    Duration::from_secs(u64::from((lease / 2).max(MIN_RENEW_SECS)))
+}
+
+/// Renew `backend`'s mapping until `stop`, then remove it. Each renewal returns
+/// the delay for the next one, derived from that renewal's granted lifetime.
+fn manage(
+    backend: &mut Backend,
+    mut delay: Duration,
+    port: u16,
+    stop: &AtomicBool,
+    mut sleep: impl FnMut(Duration, &AtomicBool) -> bool,
+) {
     loop {
-        if sleep_until(renew_after, stop) {
+        if sleep(delay, stop) {
             break; // asked to stop
         }
-        if !renew(backend, port) {
+        let Some(next) = renew(backend, port) else {
             // One failed renewal stops the loop: no tight retry, no worker
             // left behind. Remove what we created so no stale hole remains.
             warn("failed to renew the port mapping; removing it and stopping");
             remove(backend);
             return;
-        }
+        };
+        delay = next;
     }
     remove(backend);
 }
 
 /// Try exactly the backends the policy names, in order. Returns the backend
-/// and granted lease seconds. Never falls through to an unnamed backend.
+/// and the delay until its first renewal. Never falls through to an unnamed
+/// backend.
 fn map_once(
     local_ip: Option<IpAddr>,
     port: u16,
     policy: MappingPolicy,
-) -> Option<(Backend, u32)> {
+) -> Option<(Backend, Duration)> {
     map_once_with(local_ip, port, policy, map_natpmp)
 }
 
@@ -280,8 +295,8 @@ fn map_once_with(
     local_ip: Option<IpAddr>,
     port: u16,
     policy: MappingPolicy,
-    natpmp: impl Fn(u16) -> Option<(Backend, u32)>,
-) -> Option<(Backend, u32)> {
+    natpmp: impl Fn(u16) -> Option<(Backend, Duration)>,
+) -> Option<(Backend, Duration)> {
     for backend in policy.backends() {
         let result = match backend {
             MappingPolicy::Upnp => local_ip.and_then(|ip| map_upnp(ip, port)),
@@ -295,7 +310,7 @@ fn map_once_with(
     None
 }
 
-fn map_upnp(local_ip: IpAddr, port: u16) -> Option<(Backend, u32)> {
+fn map_upnp(local_ip: IpAddr, port: u16) -> Option<(Backend, Duration)> {
     let options = SearchOptions {
         bind_addr: SocketAddr::new(local_ip, 0),
         timeout: Some(Duration::from_secs(5)),
@@ -312,7 +327,7 @@ fn map_via_gateway(
     gateway: igd::Gateway,
     local_addr: SocketAddr,
     port: u16,
-) -> Option<(Backend, u32)> {
+) -> Option<(Backend, Duration)> {
     // We advertise our listen port verbatim to the Soulseek server, so the
     // EXTERNAL port must equal it. If the exact port can't be mapped (e.g.
     // another LAN device already claimed it), a different external port would
@@ -333,7 +348,7 @@ fn map_via_gateway(
         ));
         return None;
     }
-    let lease = LEASE_SECS;
+    let delay = renewal_delay(LEASE_SECS);
     let external = gateway
         .get_external_ip()
         .map_or_else(|_| "?".to_string(), |ip| ip.to_string());
@@ -345,40 +360,27 @@ fn map_via_gateway(
             gateway: Box::new(gateway),
             local_addr,
             external_port: port,
-            lease,
+            lease: LEASE_SECS,
         },
-        lease,
+        delay,
     ))
 }
 
-fn map_natpmp(port: u16) -> Option<(Backend, u32)> {
+fn map_natpmp(port: u16) -> Option<(Backend, Duration)> {
     let gateway_ip = nat_pmp::default_gateway()?;
     let gateway =
         SocketAddr::new(IpAddr::V4(gateway_ip), nat_pmp::NAT_PMP_PORT);
+    map_natpmp_at(gateway, port)
+}
+
+fn map_natpmp_at(gateway: SocketAddr, port: u16) -> Option<(Backend, Duration)> {
     let response =
         nat_pmp::map_tcp(gateway, port, port, LEASE_SECS, NATPMP_ATTEMPTS)
             .ok()?;
-    // The server advertises our listen port verbatim, so a different external
-    // port would be unreachable for peers. Do not keep a mapping that points
-    // somewhere we cannot advertise; undo it before returning.
-    if response.external_port != port {
-        warn(&format!(
-            "NAT-PMP granted external port {} instead of {port}; removing the \
-             mapping rather than advertising the wrong port — forward TCP \
-             {port} manually if you need it",
-            response.external_port
-        ));
+    let Some(delay) = natpmp_renewal_delay(response, port) else {
         let _ = nat_pmp::unmap_tcp(gateway, port, 2);
         return None;
-    }
-    if response.lifetime == 0 {
-        warn(
-            "NAT-PMP granted a permanent mapping instead of a finite lease; \
-             removing it rather than leaving a mapping that cannot expire",
-        );
-        let _ = nat_pmp::unmap_tcp(gateway, port, 2);
-        return None;
-    }
+    };
     info(&format!(
         "NAT-PMP: mapped external port {} -> local {port} (lease {}s)",
         response.external_port, response.lifetime
@@ -389,38 +391,80 @@ fn map_natpmp(port: u16) -> Option<(Backend, u32)> {
             internal_port: port,
             lease: response.lifetime,
         },
-        response.lifetime,
+        delay,
     ))
 }
 
-fn renew(backend: &Backend, port: u16) -> bool {
+/// A grant is only usable if it keeps the advertised port and stays finite and
+/// long enough to be renewed before it expires. Returns the next renewal delay.
+fn natpmp_renewal_delay(response: MapResponse, port: u16) -> Option<Duration> {
+    if response.external_port != port {
+        warn(&format!(
+            "NAT-PMP granted external port {} instead of {port}; removing the \
+             mapping rather than advertising the wrong port — forward TCP \
+             {port} manually if you need it",
+            response.external_port
+        ));
+        return None;
+    }
+    if response.lifetime == 0 {
+        warn(
+            "NAT-PMP granted a permanent mapping instead of a finite lease; \
+             removing it rather than leaving a mapping that cannot expire",
+        );
+        return None;
+    }
+    if response.lifetime <= MIN_RENEW_SECS {
+        warn(&format!(
+            "NAT-PMP granted a {}s lease, at or below the {MIN_RENEW_SECS}s \
+             renewal floor; removing it rather than letting it expire unmanaged",
+            response.lifetime
+        ));
+        return None;
+    }
+    Some(renewal_delay(response.lifetime))
+}
+
+fn renew(backend: &mut Backend, port: u16) -> Option<Duration> {
     match backend {
         Backend::Upnp {
             gateway,
             local_addr,
             external_port,
             lease,
-        } => gateway
-            .add_port(
-                PortMappingProtocol::TCP,
-                *external_port,
-                *local_addr,
-                *lease,
-                MAPPING_DESCRIPTION,
-            )
-            .is_ok(),
+        } => {
+            if gateway
+                .add_port(
+                    PortMappingProtocol::TCP,
+                    *external_port,
+                    *local_addr,
+                    *lease,
+                    MAPPING_DESCRIPTION,
+                )
+                .is_err()
+            {
+                warn("UPnP refused to renew the port mapping");
+                return None;
+            }
+            Some(renewal_delay(*lease))
+        }
         Backend::NatPmp {
             gateway,
             internal_port,
             lease,
-        } => nat_pmp::map_tcp(
-            *gateway,
-            *internal_port,
-            port,
-            *lease,
-            NATPMP_ATTEMPTS,
-        )
-        .is_ok(),
+        } => {
+            let response = nat_pmp::map_tcp(
+                *gateway,
+                *internal_port,
+                port,
+                *lease,
+                NATPMP_ATTEMPTS,
+            )
+            .ok()?;
+            let delay = natpmp_renewal_delay(response, port)?;
+            *lease = response.lifetime;
+            Some(delay)
+        }
     }
 }
 
@@ -492,19 +536,9 @@ impl PortMapper {
         let _ = thread::Builder::new()
             .name("port-mapper-test".into())
             .spawn(move || {
-                if let Ok(response) = nat_pmp::map_tcp(
-                    gateway,
-                    port,
-                    port,
-                    LEASE_SECS,
-                    NATPMP_ATTEMPTS,
-                ) {
-                    let backend = Backend::NatPmp {
-                        gateway,
-                        internal_port: port,
-                        lease: response.lifetime,
-                    };
-                    manage(&backend, response.lifetime, port, &thread_stop);
+                if let Some((mut backend, delay)) = map_natpmp_at(gateway, port)
+                {
+                    manage(&mut backend, delay, port, &thread_stop, sleep_until);
                 }
                 let _ = done_tx.send(());
             });
@@ -550,6 +584,251 @@ mod tests {
             }
         });
         (addr, rx)
+    }
+
+    enum Reply {
+        Grant { external: u16, lifetime: u32 },
+        Refuse(u16),
+    }
+
+    fn map_reply(
+        result: u16,
+        internal: u16,
+        external: u16,
+        lifetime: u32,
+    ) -> Vec<u8> {
+        let mut reply = vec![0u8, 130];
+        reply.extend_from_slice(&result.to_be_bytes());
+        reply.extend_from_slice(&7u32.to_be_bytes());
+        reply.extend_from_slice(&internal.to_be_bytes());
+        reply.extend_from_slice(&external.to_be_bytes());
+        reply.extend_from_slice(&lifetime.to_be_bytes());
+        reply
+    }
+
+    /// A gateway whose map replies are scripted in order. Unmap requests are
+    /// always acknowledged and never consume a scripted reply.
+    fn scripted_gateway(
+        replies: Vec<Reply>,
+    ) -> (SocketAddr, mpsc::Receiver<Vec<u8>>) {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = socket.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut replies = replies.into_iter();
+            let mut buf = [0u8; 64];
+            while let Ok((n, from)) = socket.recv_from(&mut buf) {
+                let request = buf[..n].to_vec();
+                let internal =
+                    u16::from_be_bytes(request[4..6].try_into().unwrap());
+                let lifetime =
+                    u32::from_be_bytes(request[8..12].try_into().unwrap());
+                let reply = if lifetime == 0 {
+                    map_reply(0, internal, 0, 0)
+                } else {
+                    match replies.next() {
+                        Some(Reply::Grant { external, lifetime }) => {
+                            map_reply(0, internal, external, lifetime)
+                        }
+                        Some(Reply::Refuse(code)) => {
+                            map_reply(code, internal, 0, 0)
+                        }
+                        None => map_reply(5, internal, 0, 0),
+                    }
+                };
+                if tx.send(request).is_err() {
+                    break;
+                }
+                let _ = socket.send_to(&reply, from);
+            }
+        });
+        (addr, rx)
+    }
+
+    fn collect_requests(requests: &mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        requests.try_iter().collect()
+    }
+
+    fn is_unmap(request: &[u8]) -> bool {
+        requested_lifetime(request) == 0
+    }
+
+    fn requested_lifetime(request: &[u8]) -> u32 {
+        u32::from_be_bytes(request[8..12].try_into().unwrap())
+    }
+
+    /// Let the first wait elapse, then stop. Reveals the deadlines `manage`
+    /// computed without waiting for them in real time.
+    fn stop_after_one_renewal(
+        backend: &mut Backend,
+        delay: Duration,
+        port: u16,
+    ) -> Vec<Duration> {
+        let stop = AtomicBool::new(false);
+        let mut delays = Vec::new();
+        let mut calls = 0;
+        manage(backend, delay, port, &stop, |duration, _| {
+            delays.push(duration);
+            calls += 1;
+            calls >= 2
+        });
+        delays
+    }
+
+    #[test]
+    fn renewal_recomputes_next_deadline_from_granted_lifetime() {
+        let (gateway, sent) = scripted_gateway(vec![
+            Reply::Grant {
+                external: 2234,
+                lifetime: 600,
+            },
+            Reply::Grant {
+                external: 2234,
+                lifetime: 120,
+            },
+        ]);
+        let (mut backend, delay) = map_natpmp_at(gateway, 2234)
+            .expect("the initial mapping should succeed");
+        assert_eq!(delay, Duration::from_secs(300));
+
+        let delays = stop_after_one_renewal(&mut backend, delay, 2234);
+        assert_eq!(
+            delays,
+            [Duration::from_secs(300), Duration::from_secs(60)],
+            "the next deadline must come from the granted 120s lease"
+        );
+
+        let sent = collect_requests(&sent);
+        let maps: Vec<_> = sent.iter().filter(|r| !is_unmap(r)).collect();
+        assert_eq!(maps.len(), 2);
+        assert_eq!(requested_lifetime(maps[0]), LEASE_SECS);
+        assert_eq!(
+            requested_lifetime(maps[1]),
+            600,
+            "the renewal must ask for the currently granted lease"
+        );
+        assert_eq!(sent.iter().filter(|r| is_unmap(r)).count(), 1);
+    }
+
+    #[test]
+    fn renewal_detects_a_changed_external_port_and_removes_the_mapping() {
+        let (gateway, sent) = scripted_gateway(vec![
+            Reply::Grant {
+                external: 2234,
+                lifetime: 600,
+            },
+            Reply::Grant {
+                external: 40000,
+                lifetime: 600,
+            },
+        ]);
+        let (mut backend, delay) =
+            map_natpmp_at(gateway, 2234).expect("initial map should succeed");
+
+        let delays = stop_after_one_renewal(&mut backend, delay, 2234);
+        assert_eq!(delays, [Duration::from_secs(300)]);
+
+        let sent = collect_requests(&sent);
+        assert_eq!(sent.iter().filter(|r| !is_unmap(r)).count(), 2);
+        assert_eq!(
+            sent.iter().filter(|r| is_unmap(r)).count(),
+            1,
+            "a mapping at an unadvertised port must be removed"
+        );
+    }
+
+    #[test]
+    fn renewal_rejects_a_permanent_grant_and_removes_the_mapping() {
+        let (gateway, sent) = scripted_gateway(vec![
+            Reply::Grant {
+                external: 2234,
+                lifetime: 600,
+            },
+            Reply::Grant {
+                external: 2234,
+                lifetime: 0,
+            },
+        ]);
+        let (mut backend, delay) =
+            map_natpmp_at(gateway, 2234).expect("initial map should succeed");
+
+        stop_after_one_renewal(&mut backend, delay, 2234);
+        let sent = collect_requests(&sent);
+        assert_eq!(
+            sent.iter().filter(|r| is_unmap(r)).count(),
+            1,
+            "a permanent mapping cannot be left behind"
+        );
+    }
+
+    #[test]
+    fn a_lease_at_or_below_the_renewal_floor_is_never_kept() {
+        let (gateway, sent) = scripted_gateway(vec![Reply::Grant {
+            external: 2234,
+            lifetime: MIN_RENEW_SECS,
+        }]);
+        assert!(map_natpmp_at(gateway, 2234).is_none());
+        let sent = collect_requests(&sent);
+        assert_eq!(sent.len(), 2, "a refused mapping must be unmapped");
+        assert!(is_unmap(&sent[1]));
+
+        let (gateway, sent) = scripted_gateway(vec![
+            Reply::Grant {
+                external: 2234,
+                lifetime: 600,
+            },
+            Reply::Grant {
+                external: 2234,
+                lifetime: MIN_RENEW_SECS,
+            },
+        ]);
+        let (mut backend, delay) =
+            map_natpmp_at(gateway, 2234).expect("initial map should succeed");
+        stop_after_one_renewal(&mut backend, delay, 2234);
+        let sent = collect_requests(&sent);
+        assert_eq!(
+            sent.iter().filter(|r| is_unmap(r)).count(),
+            1,
+            "a too-short renewal must be removed"
+        );
+    }
+
+    #[test]
+    fn renewal_failure_removes_the_mapping() {
+        let (gateway, sent) = scripted_gateway(vec![
+            Reply::Grant {
+                external: 2234,
+                lifetime: 600,
+            },
+            Reply::Refuse(2),
+        ]);
+        let (mut backend, delay) =
+            map_natpmp_at(gateway, 2234).expect("initial map should succeed");
+
+        stop_after_one_renewal(&mut backend, delay, 2234);
+        let sent = collect_requests(&sent);
+        assert_eq!(
+            sent.iter().filter(|r| is_unmap(r)).count(),
+            1,
+            "a refused renewal must leave no stale mapping"
+        );
+    }
+
+    #[test]
+    fn cancellation_during_the_wait_removes_without_renewing() {
+        let (gateway, sent) = scripted_gateway(vec![Reply::Grant {
+            external: 2234,
+            lifetime: 600,
+        }]);
+        let (mut backend, delay) =
+            map_natpmp_at(gateway, 2234).expect("initial map should succeed");
+
+        let stop = AtomicBool::new(true);
+        manage(&mut backend, delay, 2234, &stop, sleep_until);
+        let sent = collect_requests(&sent);
+        assert_eq!(sent.len(), 2, "only the initial map and cleanup unmap");
+        assert_eq!(requested_lifetime(&sent[0]), LEASE_SECS);
+        assert!(is_unmap(&sent[1]));
     }
 
     #[test]
@@ -691,7 +970,7 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 2234);
         let result = map_via_gateway(gateway, local_addr, 2234);
 
-        let (backend, _lease) =
+        let (backend, _delay) =
             result.expect("mapping against a healthy IGD should succeed");
         match backend {
             Backend::Upnp { external_port, .. } => {

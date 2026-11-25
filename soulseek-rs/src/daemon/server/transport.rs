@@ -14,7 +14,7 @@ use super::Daemon;
 use crate::output::Exit;
 use deser_value::Value;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -415,12 +415,20 @@ fn write_loop(stream: Stream, outbox: &Receiver<Response>) {
 /// rather than warning after the damage is done. Use the default Unix socket
 /// for local control, or put a trusted tunnel in front of loopback for remote.
 pub fn bind_tcp(address: &str) -> std::io::Result<Listener> {
-    use std::net::ToSocketAddrs;
+    bind_with(address, |address| {
+        use std::net::ToSocketAddrs;
+        address.to_socket_addrs().map(std::iter::Iterator::collect)
+    })
+}
 
-    let addresses = address
-        .to_socket_addrs()
-        .map_err(|e| invalid_bind(address, &e.to_string()))?
-        .collect::<Vec<_>>();
+/// Vet the endpoints `resolve` returns and bind exactly those, never the
+/// original string: a second resolution could produce an unchecked endpoint.
+fn bind_with(
+    address: &str,
+    resolve: impl FnOnce(&str) -> std::io::Result<Vec<SocketAddr>>,
+) -> std::io::Result<Listener> {
+    let addresses =
+        resolve(address).map_err(|e| invalid_bind(address, &e.to_string()))?;
     if addresses.is_empty()
         || !addresses.iter().all(|addr| addr.ip().is_loopback())
     {
@@ -431,7 +439,7 @@ pub fn bind_tcp(address: &str) -> std::io::Result<Listener> {
              or use the local Unix socket",
         ));
     }
-    TcpListener::bind(address).map(Listener::Tcp)
+    TcpListener::bind(&addresses[..]).map(Listener::Tcp)
 }
 
 fn invalid_bind(address: &str, reason: &str) -> std::io::Error {
@@ -484,6 +492,60 @@ fn remove_stale_socket(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn a_multi_address_hostname_with_a_non_loopback_address_binds_nothing() {
+        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let resolved = vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port)),
+        ];
+        let error = bind_with("multi.invalid:0", |_| Ok(resolved.clone()))
+            .err()
+            .expect("a non-loopback resolution must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("no TLS"), "{error}");
+
+        // Refusal happens before any socket is opened, so the vetted loopback
+        // endpoint is still free.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .expect("the rejected bind must not have opened a listener");
+        drop(listener);
+    }
+
+    #[test]
+    fn binding_uses_the_vetted_addresses_not_the_original_hostname() {
+        // The scripted resolution is loopback-only but the address string
+        // names the wildcard: re-resolving it would expose the daemon.
+        let resolved = vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            SocketAddr::from((Ipv4Addr::new(127, 0, 0, 2), 0)),
+        ];
+        let listener = bind_with("0.0.0.0:0", |_| Ok(resolved.clone()))
+            .expect("the vetted loopback addresses must bind");
+        let Listener::Tcp(listener) = listener else {
+            panic!("expected a TCP listener");
+        };
+        let address = listener.local_addr().unwrap();
+        assert!(address.ip().is_loopback(), "bound {address}");
+    }
+
+    #[test]
+    fn a_loopback_hostname_resolving_to_several_addresses_binds() {
+        for address in ["localhost:0", "127.0.0.1:0"] {
+            let listener =
+                bind_tcp(address).unwrap_or_else(|e| panic!("{address}: {e}"));
+            let Listener::Tcp(listener) = listener else {
+                panic!("expected a TCP listener for {address}");
+            };
+            let bound = listener.local_addr().unwrap();
+            assert!(bound.ip().is_loopback(), "bound {bound} for {address}");
+        }
+    }
 
     #[test]
     fn a_remote_plaintext_control_bind_is_refused_before_listening() {
