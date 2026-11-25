@@ -11,7 +11,7 @@ pub const BIND: OptionSpec = value(
     "bind",
     "ADDR",
     ValueKind::Text,
-    "Also accept control connections on this address, for clients on other machines. They need the token; the local socket does not.",
+    "Also accept control connections on a loopback ADDR, for clients over an SSH tunnel. Non-loopback binds are refused; TCP clients need the token, the local socket does not.",
 );
 
 pub const UPLOAD_SLOTS: OptionSpec = with_range(
@@ -88,4 +88,23 @@ pub fn spec() -> CommandSpec {
 
 fn internal(id: CommandId) -> ParseError {
     ParseError::new(format!("internal: {id:?} is not a daemon command"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::help;
+
+    #[test]
+    fn bind_help_describes_the_loopback_tunnel_route() {
+        let rendered = help::render_path(&["daemon".to_string()])
+            .expect("daemon help");
+        assert!(
+            rendered.contains(BIND.help),
+            "the rendered daemon help must carry the --bind contract: {rendered}"
+        );
+        assert!(BIND.help.contains("loopback"), "{}", BIND.help);
+        assert!(BIND.help.contains("SSH tunnel"), "{}", BIND.help);
+        assert!(!BIND.help.contains("other machines"), "{}", BIND.help);
+    }
 }

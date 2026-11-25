@@ -73,15 +73,6 @@ Next: 23
 - **Fix with:** test-audit
 - **Effort:** S
 
-### SOUL-19 · P2 · CLI help still advertises non-loopback daemon control binds that are always refused
-
-- **Area:** CLI contract
-- **Where:** soulseek-rs/src/cli/daemon.rs:9-15; soulseek-rs/src/daemon/server/transport.rs:580-607,718-727; README.md daemon tunnel section; soulseek-rs/src/SKILL.md daemon section
-- **Problem:** The shipped help says --bind is for clients on other machines, while transport validation rejects every non-loopback bind before listening and has a regression test for 0.0.0.0:5030. README and the embedded skill were corrected to the SSH-tunnel route, but the binary's own help still sends users down the impossible direct-LAN path. Proven by the help string and refusal test.
-- **Recommendation:** Change the help text to describe loopback TCP plus SSH forwarding, or deliberately introduce an explicit authenticated remote-control mode if direct LAN access is intended. Keep the refusal test as the negative control for the current contract.
-- **Fix with:** single-source-of-truth
-- **Effort:** S
-
 ### SOUL-20 · P2 · Transfer direction is flattened into an unconditional download accept path
 
 - **Area:** Peer protocol correctness
