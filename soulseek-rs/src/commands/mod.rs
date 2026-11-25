@@ -70,19 +70,29 @@ impl Ctx {
     /// on. Reported as exit 4 it reads as "this file is not on the network",
     /// and a caller acting on that gives up on files that were there.
     fn checked(&self, result: CliResult) -> CliResult {
-        let Err(error) = result else {
-            return Ok(());
-        };
-        if !matches!(
-            error.exit,
-            Exit::NoResults | Exit::Timeout | Exit::Transfer
-        ) {
-            return Err(error);
-        }
-        match self.session.get().and_then(|client| client.session_loss()) {
-            Some(loss) => Err(session_lost(loss)),
-            None => Err(error),
-        }
+        check_verdict(
+            result,
+            self.session.get().and_then(|client| client.session_loss()),
+        )
+    }
+}
+
+/// Rewrite a "nothing found" verdict only while the session that produced it
+/// is still lost. `None` means live — including a session that has recovered
+/// since the loss event — so the ordinary failure survives.
+fn check_verdict(result: CliResult, loss: Option<SessionLoss>) -> CliResult {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if !matches!(
+        error.exit,
+        Exit::NoResults | Exit::Timeout | Exit::Transfer
+    ) {
+        return Err(error);
+    }
+    match loss {
+        Some(loss) => Err(session_lost(loss)),
+        None => Err(error),
     }
 }
 
@@ -398,12 +408,45 @@ pub fn portmap(out: &Out, port: u16) -> CliResult {
 
 #[cfg(test)]
 mod tests {
-    use super::listen_span;
+    use super::{check_verdict, listen_span};
+    use crate::output::{CliError, Exit};
+    use soulseek_rs::SessionLoss;
     use std::time::Duration;
 
     #[test]
     fn follow_listens_without_a_deadline() {
         assert_eq!(listen_span(30, true), None);
         assert_eq!(listen_span(30, false), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn an_empty_result_after_a_successful_relogin_stays_empty() {
+        let empty = || {
+            Err::<(), _>(CliError::new(Exit::NoResults, "found nothing"))
+        };
+
+        // Disconnect, then a successful relogin: the verdict is no longer
+        // rewritten even though the client once saw a loss event.
+        assert_eq!(
+            check_verdict(empty(), Some(SessionLoss::Disconnected))
+                .unwrap_err()
+                .exit,
+            Exit::SessionLost
+        );
+        assert_eq!(
+            check_verdict(empty(), None).unwrap_err().exit,
+            Exit::NoResults
+        );
+    }
+
+    #[test]
+    fn a_still_displaced_session_keeps_rewriting_verdicts() {
+        let error = check_verdict(
+            Err::<(), _>(CliError::new(Exit::Transfer, "transfer failed")),
+            Some(SessionLoss::Displaced),
+        )
+        .unwrap_err();
+        assert_eq!(error.exit, Exit::SessionLost);
+        assert!(error.message.contains("another login took over"));
     }
 }

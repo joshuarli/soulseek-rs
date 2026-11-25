@@ -94,9 +94,7 @@ impl Mirror {
             }
             Event::SessionLoss => {
                 if let Ok(loss) = parse::<SessionLossEvent>(event, params) {
-                    // The first loss is the one worth keeping: a displaced
-                    // session also drops its socket a moment later.
-                    buffers.loss.get_or_insert_with(|| loss.loss.into());
+                    Self::record(&mut buffers, Some(loss.loss.into()));
                 }
             }
         }
@@ -117,6 +115,28 @@ impl Mirror {
         if terminal || !delivered {
             buffers.downloads.remove(&key);
         }
+    }
+
+    /// Set connectivity, keeping a displaced session terminal. A displaced
+    /// socket drops a moment later too, and that consequence must not replace
+    /// the reason.
+    const fn record(buffers: &mut Buffers, loss: Option<SessionLoss>) {
+        if !matches!(buffers.loss, Some(SessionLoss::Displaced)) {
+            buffers.loss = loss;
+        }
+    }
+
+    /// Reconcile the pushed events with the daemon's current connectivity.
+    ///
+    /// The daemon owns this state: a successful relogin clears its session
+    /// watch, so a loss this client saw earlier must not outlive the recovery.
+    /// A daemon that cannot be reached leaves the last known answer alone.
+    pub fn reconcile(&self, live: Option<SessionLoss>) -> Option<SessionLoss> {
+        let Ok(mut buffers) = self.0.lock() else {
+            return live;
+        };
+        Self::record(&mut buffers, live);
+        buffers.loss
     }
 
     /// Stop tracking every transfer, so anything blocked on one is told the
@@ -313,6 +333,34 @@ mod tests {
             Some(SessionLoss::Displaced),
             "being displaced is the reason worth reporting; the dropped socket \
              is its consequence"
+        );
+    }
+
+    #[test]
+    fn a_recovered_session_is_no_longer_marked_lost() {
+        let mirror = Mirror::default();
+        mirror.apply(Event::SessionLoss, value!({ "loss": "disconnected" }));
+        assert_eq!(mirror.loss(), Some(SessionLoss::Disconnected));
+
+        // The daemon's successful relogin clears its session watch. Reconciling
+        // with that live state must clear the old event, not latch it forever.
+        assert_eq!(mirror.reconcile(None), None);
+        assert_eq!(
+            mirror.loss(),
+            None,
+            "an ordinary empty result after recovery must not become exit 7"
+        );
+    }
+
+    #[test]
+    fn a_displaced_session_stays_lost_after_a_reported_recovery() {
+        let mirror = Mirror::default();
+        mirror.apply(Event::SessionLoss, value!({ "loss": "displaced" }));
+        assert_eq!(mirror.reconcile(None), Some(SessionLoss::Displaced));
+        assert_eq!(
+            mirror.loss(),
+            Some(SessionLoss::Displaced),
+            "a displaced name is terminal; the daemon never relogins it"
         );
     }
 

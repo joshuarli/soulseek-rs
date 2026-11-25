@@ -19,15 +19,6 @@ Next: 23
 - **Fix with:** security
 - **Effort:** M
 
-### SOUL-15 · P2 · Attached clients keep treating a recovered daemon session as lost
-
-- **Area:** Remote session lifecycle
-- **Where:** soulseek-rs/src/daemon/hub.rs:275-286; soulseek-rs/src/remote/mirror.rs:95-100; soulseek-rs/src/remote/mod.rs:471-478; soulseek-rs/src/commands/mod.rs:72-85; soulseek-rs/src/daemon/mod.rs:465-472; soulseek-rs-lib/src/types.rs:572-575
-- **Problem:** The daemon reconnects a disconnected session and a successful login clears the library session watch, but a remote mirror stores the first session_loss event with get_or_insert and never clears it. The remote session then prefers that stale latch over live daemon status, so later truthful no-results, timeout, or transfer failures can be rewritten into exit 7 indefinitely. Proven by the state flow; no end-to-end reconnect was run.
-- **Recommendation:** Make connectivity one canonical state owned by the daemon, with Disconnected to Live permitted and Displaced terminal. Publish recovery or update the mirror from live status instead of latching the first loss, and add a regression covering disconnect, successful relogin, then an ordinary empty result.
-- **Fix with:** audit-implicit-state-machine
-- **Effort:** M
-
 ### SOUL-16 · P2 · Paused downloads restart automatically after daemon recovery
 
 - **Area:** Durable transfer state

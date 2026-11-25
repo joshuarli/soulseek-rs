@@ -373,6 +373,16 @@ fn rebuild(dto: DownloadDto, sender: Sender<DownloadStatus>) -> Download {
     }
 }
 
+/// Resolve connectivity from the daemon's status, falling back to the mirror
+/// when the daemon cannot answer (`Disconnected` → `Live` is permitted;
+/// `Displaced` is terminal in [`Mirror::reconcile`]).
+fn reconciled_loss(mirror: &Mirror, status: Option<DaemonStatus>) -> Option<SessionLoss> {
+    match status {
+        Some(status) => mirror.reconcile(status.session_loss.map(Into::into)),
+        None => mirror.loss(),
+    }
+}
+
 fn network(message: impl Into<String>) -> SoulseekRs {
     SoulseekRs::InvalidMessage(message.into())
 }
@@ -469,13 +479,11 @@ impl SessionApi for RemoteSession {
     }
 
     fn session_loss(&self) -> Option<SessionLoss> {
-        // The pushed event is the prompt answer; the status call also covers a
-        // loss that happened before this client attached.
-        self.mirror.loss().or_else(|| {
-            self.status()
-                .and_then(|status| status.session_loss)
-                .map(Into::into)
-        })
+        // The daemon's live status is canonical: it clears the library's
+        // session watch on a successful relogin. Reconciling here stops an
+        // earlier pushed event from turning a later ordinary failure into exit
+        // 7 forever. Without an answer, the last known state stands.
+        reconciled_loss(&self.mirror, self.status())
     }
 
     fn search_with_cancel(
@@ -947,6 +955,57 @@ mod tests {
         let error = answer.recv().unwrap().expect_err("an error reply");
         assert_eq!(error.message, "nope");
         assert_eq!(error.exit(), crate::output::Exit::NoResults);
+    }
+
+    fn status(
+        session_loss: Option<crate::daemon::proto::SessionLossDto>,
+    ) -> DaemonStatus {
+        DaemonStatus {
+            username: "alice".into(),
+            server: "server.test:2416".into(),
+            daemon_version: "test".into(),
+            protocol: PROTOCOL_VERSION,
+            listen_port: None,
+            shared_folders: 0,
+            shared_files: 0,
+            download_dir: "/music".into(),
+            session_loss,
+            clients: 1,
+            uptime_secs: 0,
+        }
+    }
+
+    #[test]
+    fn a_relogin_in_daemon_status_clears_a_stale_loss_event() {
+        let mirror = Mirror::default();
+        mirror.apply(
+            Event::SessionLoss,
+            deser_value::value!({ "loss": "disconnected" }),
+        );
+        let lost = status(Some(crate::daemon::proto::SessionLossDto::Disconnected));
+        assert_eq!(
+            reconciled_loss(&mirror, Some(lost)),
+            Some(SessionLoss::Disconnected)
+        );
+
+        // The daemon relogs in successfully and its status reports no loss.
+        // A later truthful "found nothing" is no longer rewritten as exit 7.
+        assert_eq!(reconciled_loss(&mirror, Some(status(None))), None);
+        assert_eq!(mirror.loss(), None);
+    }
+
+    #[test]
+    fn a_daemon_that_cannot_be_answered_keeps_the_last_known_loss() {
+        let mirror = Mirror::default();
+        mirror.apply(
+            Event::SessionLoss,
+            deser_value::value!({ "loss": "disconnected" }),
+        );
+        assert_eq!(
+            reconciled_loss(&mirror, None),
+            Some(SessionLoss::Disconnected),
+            "an unreachable daemon is no reason to forget a real loss"
+        );
     }
 
     #[test]
