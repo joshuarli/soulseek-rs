@@ -10,15 +10,6 @@ Next: 23
 - **Fix with:** lifecycle-concurrency
 - **Effort:** L
 
-### SOUL-20 · P2 · Transfer direction is flattened into an unconditional download accept path
-
-- **Area:** Peer protocol correctness
-- **Where:** soulseek-rs-lib/src/types.rs:165-172,472-485; soulseek-rs-lib/src/message/server/message_factory.rs:250-275; soulseek-rs-lib/src/client/operations/transfers.rs:82-140
-- **Problem:** Transfer.direction is an unconstrained u32, the parser always reads a direction-dependent size, and UpdateDownloadTokens never branches on direction. The codec writes direction 0 without size for a download request and direction 1 with size for an upload offer, yet an incoming direction-0 request is handled through the same download-token update path. Even when no local download matches, the peer receives an allowed transfer response rather than a denial. Proven statically from the wire shapes and control flow; no live peer reproduction was run.
-- **Recommendation:** Model TransferRequest direction as a closed type that carries size only where the wire format does, dispatch download requests and upload offers separately, and deny requests that do not match a live queued transfer. Add protocol-level regression tests for direction 0, direction 1, unknown direction, truncation, and no matching token.
-- **Fix with:** reference-parity
-- **Effort:** M
-
 ### SOUL-21 · P2 · Server backpressure disconnects the control session instead of deferring writes
 
 - **Area:** Server transport reliability

@@ -14,6 +14,138 @@ use super::{
 const QUEUE_FULL_REASON: &str = "Upload queue full";
 
 impl Client {
+    /// Send a code 41 on the peer's control connection. No context lock is
+    /// held while the actor's mailbox is touched.
+    fn send_transfer_reply(
+        client_context: &Arc<RwLock<ClientContext>>,
+        username: &str,
+        reply: crate::message::Message,
+    ) {
+        let registry = match client_context.read_safe() {
+            Ok(ctx) => ctx.peer_registry.clone(),
+            Err(e) => {
+                error!("[client] transfer reply read: {e}");
+                return;
+            }
+        };
+        if let Some(registry) = registry {
+            let _ = registry
+                .send_to_peer(username, PeerMessage::SendMessage(reply));
+        }
+    }
+
+    /// Decide a direction-0 reply from the live upload state. Separate from
+    /// sending so the decision can be exercised without a peer connection.
+    fn download_request_reply(
+        context: &ClientContext,
+        username: &str,
+        token: u32,
+        filename: &str,
+    ) -> crate::message::Message {
+        let matched = context.upload_queue.iter().any(|job| {
+            job.downloader == username && job.virtual_path == filename
+        }) || context.uploads.values().any(|job| {
+            job.downloader == username && job.virtual_path == filename
+        });
+        if matched {
+            MessageFactory::build_transfer_response_message(token)
+        } else {
+            MessageFactory::build_transfer_denial_message(
+                token,
+                "No matching transfer",
+            )
+        }
+    }
+
+    /// Direction 0: the peer wants one of our files. Only a file that is
+    /// actually queued or already offered to that peer may be accepted.
+    fn on_download_request(
+        client_context: &Arc<RwLock<ClientContext>>,
+        username: &str,
+        token: u32,
+        filename: &str,
+    ) {
+        let (registry, reply) = match client_context.read_safe() {
+            Ok(ctx) => (
+                ctx.peer_registry.clone(),
+                Self::download_request_reply(&ctx, username, token, filename),
+            ),
+            Err(e) => {
+                error!("[client] download request read: {e}");
+                return;
+            }
+        };
+        if let Some(registry) = registry {
+            let _ = registry
+                .send_to_peer(username, PeerMessage::SendMessage(reply));
+        }
+    }
+
+    /// Decide a direction-1 reply and re-key a matching download. The caller
+    /// holds the write lock so the file connection cannot race the token.
+    fn upload_offer_reply(
+        context: &mut ClientContext,
+        username: &str,
+        token: u32,
+        filename: &str,
+        size: u64,
+    ) -> crate::message::Message {
+        let download_to_update = context
+            .downloads
+            .get_by_file(username, filename)
+            .map(|d| (d.token, d.clone()));
+        let cancelled = download_to_update
+            .as_ref()
+            .is_some_and(|(_, d)| matches!(d.status, DownloadStatus::Cancelled));
+        if !cancelled
+            && let Some((old_token, download)) = download_to_update
+        {
+            trace!("[client] upload offer re-keys download {old_token} to {token}");
+            context.add_download(Download {
+                token,
+                size,
+                ..download
+            });
+            context.remove_download(old_token);
+            MessageFactory::build_transfer_response_message(token)
+        } else {
+            let reason = if cancelled {
+                "Cancelled"
+            } else {
+                "No matching transfer"
+            };
+            MessageFactory::build_transfer_denial_message(token, reason)
+        }
+    }
+
+    /// Direction 1: the peer offers us a file we queued. Re-key the download
+    /// to their token before inviting the file connection, and refuse an
+    /// offer that has no live download behind it.
+    fn on_upload_offer(
+        client_context: &Arc<RwLock<ClientContext>>,
+        username: &str,
+        token: u32,
+        filename: &str,
+        size: u64,
+    ) {
+        let (registry, reply) = match client_context.write_safe() {
+            Ok(mut ctx) => (
+                ctx.peer_registry.clone(),
+                Self::upload_offer_reply(
+                    &mut ctx, username, token, filename, size,
+                ),
+            ),
+            Err(e) => {
+                error!("[client] upload offer write: {e}");
+                return;
+            }
+        };
+        if let Some(registry) = registry {
+            let _ = registry
+                .send_to_peer(username, PeerMessage::SendMessage(reply));
+        }
+    }
+
     pub(super) fn on_transfers(
         operation: ClientOperation,
         client_context: &Arc<RwLock<ClientContext>>,
@@ -81,61 +213,37 @@ impl Client {
                 });
             }
             ClientOperation::UpdateDownloadTokens(transfer, username) => {
-                let mut context = match client_context.write_safe() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("[client] UpdateDownloadTokens write: {}", e);
-                        return;
-                    }
-                };
-
-                let download_to_update = context
-                    .downloads
-                    .get_by_file(&username, &transfer.filename)
-                    .map(|d| (d.token, d.clone()));
-
-                let cancelled =
-                    download_to_update.as_ref().is_some_and(|(_, d)| {
-                        matches!(d.status, DownloadStatus::Cancelled)
-                    });
-                if !cancelled
-                    && let Some((old_token, download)) = download_to_update
-                {
-                    trace!(
-                        "[client] UpdateDownloadTokens found {old_token}, transfer: {:?}",
-                        transfer
-                    );
-
-                    context.add_download(Download {
-                        token: transfer.token,
-                        size: transfer.size,
-                        ..download
-                    });
-                    context.remove_download(old_token);
-                }
-
-                // Only now invite the file connection: it is
-                // matched by this token, which is recorded as
-                // of the line above. Answering any earlier
-                // races the peer's connection against our own
-                // bookkeeping.
-                let registry = context.peer_registry.clone();
-                drop(context);
-                if let Some(registry) = registry {
-                    let response = if cancelled {
-                        MessageFactory::build_transfer_denial_message(
+                // Direction decides what a code 40 means; the old code read a
+                // size from every frame and funnelled both shapes into this
+                // one download-token path.
+                match transfer.direction {
+                    crate::types::TransferDirection::DownloadRequest => {
+                        Self::on_download_request(
+                            client_context,
+                            &username,
                             transfer.token,
-                            "Cancelled",
-                        )
-                    } else {
-                        MessageFactory::build_transfer_response_message(
-                            transfer,
-                        )
-                    };
-                    let _ = registry.send_to_peer(
-                        &username,
-                        PeerMessage::SendMessage(response),
-                    );
+                            &transfer.filename,
+                        );
+                    }
+                    crate::types::TransferDirection::UploadOffer { size } => {
+                        Self::on_upload_offer(
+                            client_context,
+                            &username,
+                            transfer.token,
+                            &transfer.filename,
+                            size,
+                        );
+                    }
+                    crate::types::TransferDirection::Invalid => {
+                        Self::send_transfer_reply(
+                            client_context,
+                            &username,
+                            MessageFactory::build_transfer_denial_message(
+                                transfer.token,
+                                "invalid transfer request",
+                            ),
+                        );
+                    }
                 }
             }
             ClientOperation::StartUpload { token } => {
@@ -243,5 +351,135 @@ impl Client {
             // The dispatch loop routes only the variants above to here.
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::Message;
+
+    fn request(direction: u32, token: u32, filename: &str, size: Option<u64>) -> crate::types::Transfer {
+        let mut built = Message::new();
+        built
+            .write_int32(40)
+            .write_int32(direction)
+            .write_int32(token)
+            .write_string(filename);
+        if let Some(size) = size {
+            built.write_int64(size);
+        }
+        let mut framed = Message::new_with_data(built.get_buffer());
+        framed.set_pointer(8);
+        crate::types::Transfer::new_from_message(&mut framed)
+    }
+
+    fn assert_reply(reply: &Message, token: u32, allowed: bool) {
+        let body = reply.get_data();
+        assert_eq!(
+            u32::from_le_bytes(body[0..4].try_into().unwrap()),
+            41,
+            "the reply must be a TransferResponse"
+        );
+        assert_eq!(
+            u32::from_le_bytes(body[4..8].try_into().unwrap()),
+            token,
+            "the reply must quote the peer's token"
+        );
+        assert_eq!(body[8], u8::from(allowed));
+    }
+
+    #[test]
+    fn a_transfer_request_with_no_queued_file_is_denied() {
+        // A peer that sends a code 40 for a file we never queued must hear a
+        // refusal. Replying "allowed" invites a file connection that matches
+        // nothing and leaves the transfer stuck.
+        let context = ClientContext::for_user("me");
+        let transfer = request(0, 999, "not-queued.mp3", None);
+        assert_eq!(
+            transfer.direction,
+            crate::types::TransferDirection::DownloadRequest
+        );
+        assert_reply(
+            &Client::download_request_reply(
+                &context,
+                "bob",
+                transfer.token,
+                &transfer.filename,
+            ),
+            999,
+            false,
+        );
+    }
+
+    #[test]
+    fn an_upload_offer_without_a_queued_download_is_denied() {
+        let mut context = ClientContext::for_user("me");
+        let transfer = request(1, 999, "not-queued.mp3", Some(4096));
+        assert_eq!(
+            transfer.direction,
+            crate::types::TransferDirection::UploadOffer { size: 4096 }
+        );
+        assert_reply(
+            &Client::upload_offer_reply(
+                &mut context,
+                "bob",
+                transfer.token,
+                &transfer.filename,
+                4096,
+            ),
+            999,
+            false,
+        );
+    }
+
+    #[test]
+    fn a_download_request_for_a_queued_file_is_allowed() {
+        let mut context = ClientContext::for_user("me");
+        let file = crate::shares::synthetic_file(std::path::Path::new(
+            "song.mp3",
+        ));
+        assert!(context.enqueue_upload("bob", "song.mp3", Arc::new(file), 4096));
+        let reply = Client::download_request_reply(&context, "bob", 999, "song.mp3");
+        assert_reply(&reply, 999, true);
+    }
+
+    #[test]
+    fn a_matching_upload_offer_rekeys_the_download() {
+        let mut context = ClientContext::for_user("me");
+        context.add_download(Download {
+            username: "bob".to_string(),
+            filename: "song.mp3".to_string(),
+            token: 7,
+            size: 100,
+            download_directory: "test".to_string(),
+            status: DownloadStatus::Queued,
+            sender: std::sync::mpsc::channel().0,
+            queue_position: None,
+            metadata: crate::types::DownloadMetadata::default(),
+        });
+        let reply =
+            Client::upload_offer_reply(&mut context, "bob", 999, "song.mp3", 4096);
+        assert_reply(&reply, 999, true);
+        assert_eq!(
+            context.get_download_by_token(999).map(|d| d.size),
+            Some(4096)
+        );
+        assert!(context.get_download_by_token(7).is_none());
+    }
+
+    #[test]
+    fn an_unknown_direction_is_denied() {
+        let transfer = request(7, 999, "song.mp3", Some(4096));
+        assert_eq!(transfer.direction, crate::types::TransferDirection::Invalid);
+        assert_eq!(transfer.token, 999);
+        assert_reply(
+            &MessageFactory::build_transfer_denial_message(
+                transfer.token,
+                "invalid transfer request",
+            ),
+            999,
+            false,
+        );
     }
 }

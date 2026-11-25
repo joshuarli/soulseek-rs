@@ -1,7 +1,7 @@
 use crate::{
     message::Message,
     peer::ConnectionType,
-    types::{ClientVersion, Transfer},
+    types::ClientVersion,
     utils::md5::md5,
 };
 
@@ -276,10 +276,10 @@ impl MessageFactory {
     }
 
     #[must_use]
-    pub fn build_transfer_response_message(transfer: Transfer) -> Message {
+    pub fn build_transfer_response_message(token: u32) -> Message {
         Message::new()
             .write_int32(41)
-            .write_int32(transfer.token)
+            .write_int32(token)
             .write_bool(true)
             .clone()
     }
@@ -604,10 +604,101 @@ fn test_build_upload_transfer_request() {
     let mut decoded = Message::new_with_data(message.get_buffer());
     decoded.set_pointer(8);
     let transfer = Transfer::new_from_message(&mut decoded);
-    assert_eq!(transfer.direction, 1); // upload
-    assert_eq!(transfer.token, 555);
-    assert_eq!(transfer.filename, "song.mp3");
-    assert_eq!(transfer.size, 4096);
+    assert_eq!(
+        transfer,
+        Transfer {
+            direction: crate::types::TransferDirection::UploadOffer {
+                size: 4096
+            },
+            token: 555,
+            filename: "song.mp3".to_string(),
+        }
+    );
+}
+
+#[test]
+fn a_download_request_carries_no_size_on_the_wire() {
+    use crate::types::Transfer;
+    let message =
+        MessageFactory::build_transfer_request_message("song.mp3", 555);
+    // code + direction + token + string length + "song.mp3": no size field.
+    assert_eq!(message.get_data().len(), 4 + 4 + 4 + 4 + 8);
+    let mut decoded = Message::new_with_data(message.get_buffer());
+    decoded.set_pointer(8);
+    assert_eq!(
+        Transfer::new_from_message(&mut decoded),
+        Transfer {
+            direction: crate::types::TransferDirection::DownloadRequest,
+            token: 555,
+            filename: "song.mp3".to_string(),
+        }
+    );
+}
+
+#[test]
+fn an_unknown_transfer_direction_is_invalid() {
+    use crate::types::Transfer;
+    let message = Message::new()
+        .write_int32(40)
+        .write_int32(7)
+        .write_int32(555)
+        .write_string("song.mp3")
+        .write_int64(4096)
+        .clone();
+    let mut decoded = Message::new_with_data(message.get_buffer());
+    decoded.set_pointer(8);
+    assert_eq!(
+        Transfer::new_from_message(&mut decoded),
+        Transfer {
+            direction: crate::types::TransferDirection::Invalid,
+            token: 555,
+            filename: String::new(),
+        }
+    );
+}
+
+#[test]
+fn truncated_transfer_requests_never_invent_a_transfer() {
+    use crate::types::Transfer;
+    let name = "song.mp3";
+    let full = Message::new()
+        .write_int32(40)
+        .write_int32(1)
+        .write_int32(555)
+        .write_string(name)
+        .write_int64(4096)
+        .clone()
+        .get_buffer();
+    // Cut the upload offer at every field boundary before its size, plus a
+    // claimed filename longer than the bytes actually present.
+    let ends = [0, 4, 8, 12, 16, full.len() - 8, full.len() - 1];
+    for end in ends {
+        let mut decoded = Message::new_with_data(full[..end].to_vec());
+        decoded.set_pointer(8);
+        assert_eq!(
+            Transfer::new_from_message(&mut decoded).direction,
+            crate::types::TransferDirection::Invalid,
+            "truncation at byte {end} must be invalid"
+        );
+    }
+
+    let lying_length = Message::new()
+        .write_int32(40)
+        .write_int32(0)
+        .write_int32(555)
+        .write_int32(4096)
+        .write_string(name)
+        .clone();
+    let mut decoded = Message::new_with_data(lying_length.get_buffer());
+    decoded.set_pointer(8);
+    assert_eq!(
+        Transfer::new_from_message(&mut decoded),
+        Transfer {
+            direction: crate::types::TransferDirection::Invalid,
+            token: 555,
+            filename: String::new(),
+        }
+    );
 }
 
 #[test]

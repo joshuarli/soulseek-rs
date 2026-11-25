@@ -176,13 +176,28 @@ impl SearchResult {
     }
 }
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
+/// The closed set of `TransferRequest` directions (code 40).
+///
+/// Only an upload offer carries a size on the wire, so only that variant has
+/// one. An unrecognised direction is a variant of its own, never a number that
+/// can be mistaken for a download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferDirection {
+    /// Direction 0: the peer asks us for a file. No size on the wire.
+    DownloadRequest,
+    /// Direction 1: the peer offers us a file, quoting its size.
+    UploadOffer { size: u64 },
+    /// Unknown direction or a truncated body: nothing may be started from it.
+    Invalid,
+}
+
+/// A peer's `TransferRequest` (code 40), with a direction that determines
+/// which fields the wire actually carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transfer {
-    pub direction: u32,
+    pub direction: TransferDirection,
     pub token: u32,
     pub filename: String,
-    pub size: u64,
 }
 #[derive(Debug, Clone, Default)]
 pub struct DownloadMetadata {
@@ -484,17 +499,60 @@ pub struct UserInterests {
 }
 
 impl Transfer {
+    /// Read the direction-dependent shape of a `TransferRequest`.
+    ///
+    /// A malformed or truncated frame becomes
+    /// [`TransferDirection::Invalid`] rather than a plausible-looking transfer:
+    /// the read primitives return defaults at the end of a buffer, which would
+    /// otherwise invent a token and filename.
+    #[must_use]
     pub fn new_from_message(message: &mut Message) -> Self {
+        let invalid = |token| Self {
+            direction: TransferDirection::Invalid,
+            token,
+            filename: String::new(),
+        };
+        if message.get_pointer() + 4 > message.get_size() {
+            return invalid(0);
+        }
         let direction = message.read_int32();
+        if message.get_pointer() + 4 > message.get_size() {
+            return invalid(0);
+        }
         let token = message.read_int32();
-        let filename = message.read_string();
-        let size = message.read_int64();
+        if direction > 1 {
+            return invalid(token);
+        }
 
+        let at = message.get_pointer();
+        let data = message.get_data();
+        let Some(name_len_bytes) = data.get(at..at + 4) else {
+            return invalid(token);
+        };
+        let name_len =
+            u32::from_le_bytes(name_len_bytes.try_into().unwrap_or_default())
+                as usize;
+        if at + 4 + name_len > data.len() {
+            return invalid(token);
+        }
+        let filename = message.read_string();
+
+        if direction == 0 {
+            return Self {
+                direction: TransferDirection::DownloadRequest,
+                token,
+                filename,
+            };
+        }
+        if message.get_pointer() + 8 > message.get_size() {
+            return invalid(token);
+        }
         Self {
-            direction,
+            direction: TransferDirection::UploadOffer {
+                size: message.read_int64(),
+            },
             token,
             filename,
-            size,
         }
     }
 }
@@ -629,15 +687,28 @@ mod tests {
         );
     }
 
-    // A truncated TransferRequest from an untrusted peer must parse to defaults
-    // rather than panic (the read_* primitives are bounds-checked).
+    // A truncated TransferRequest from an untrusted peer must not turn the
+    // read primitives' zero defaults into a plausible transfer.
     #[test]
-    fn transfer_new_from_truncated_message_does_not_panic() {
+    fn transfer_new_from_truncated_message_is_invalid() {
         let mut message = Message::new_with_data(vec![1, 0, 0]);
-        let transfer = Transfer::new_from_message(&mut message);
-        assert_eq!(transfer.direction, 0);
-        assert_eq!(transfer.token, 0);
-        assert_eq!(transfer.filename, "");
-        assert_eq!(transfer.size, 0);
+        assert_eq!(
+            Transfer::new_from_message(&mut message),
+            Transfer {
+                direction: TransferDirection::Invalid,
+                token: 0,
+                filename: String::new()
+            }
+        );
+
+        let mut message = Message::new_with_data(vec![0, 0, 0, 0]);
+        assert_eq!(
+            Transfer::new_from_message(&mut message),
+            Transfer {
+                direction: TransferDirection::Invalid,
+                token: 0,
+                filename: String::new()
+            }
+        );
     }
 }
