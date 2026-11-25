@@ -530,7 +530,7 @@ impl PeerActor {
             self.extract_and_process_messages();
         }
 
-        {
+        let read_error = {
             let Some(stream) = self.stream.as_mut() else {
                 return;
             };
@@ -538,8 +538,9 @@ impl PeerActor {
             match Self::drain(&mut self.reader, stream) {
                 Ok(()) => {
                     self.last_activity = Instant::now();
+                    None
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => None,
                 Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
                     if let Ok(peer_lock) = self.peer.read_safe() {
                         debug!(
@@ -547,56 +548,72 @@ impl PeerActor {
                             peer_lock.host, peer_lock.port
                         );
                     }
+                    None
                 }
-                // A peer hanging up a control connection it had already
-                // established is ordinary: other clients close idle peer
-                // sockets while a transfer runs on its own connection. Report
-                // the clean disconnect it is — an error here fails every
-                // download queued with that peer, the one streaming included.
-                // A connection that never established is the other story: the
-                // peer accepted and vanished, which is what the server-brokered
-                // fallback exists for, so that one keeps the error path.
-                Err(ref e)
-                    if e.kind() == io::ErrorKind::UnexpectedEof
-                        && self.established =>
-                {
-                    debug!(
-                        "[peer:{}] peer closed the connection",
-                        self.peer_username()
-                    );
-                    self.disconnect();
-                    return;
-                }
-                Err(e) => {
-                    let username = self.peer_username();
-                    error!(
-                        "[peer:{}] Error reading from peer: {} (kind: {:?}). Disconnecting.",
-                        username,
-                        e,
-                        e.kind()
-                    );
-                    self.disconnect_with_error(e);
-                    return;
-                }
+                Err(e) => Some(e),
             }
+        };
+
+        if self.reader.buffer_len() > 0 {
+            self.extract_and_process_messages();
         }
-        self.extract_and_process_messages();
+
+        let Some(e) = read_error else {
+            return;
+        };
+        if self.stream.is_none() {
+            return;
+        }
+        // A peer hanging up a control connection it had already
+        // established is ordinary: other clients close idle peer
+        // sockets while a transfer runs on its own connection. Report
+        // the clean disconnect it is — an error here fails every
+        // download queued with that peer, the one streaming included.
+        // A connection that never established is the other story: the
+        // peer accepted and vanished, which is what the server-brokered
+        // fallback exists for, so that one keeps the error path.
+        if e.kind() == io::ErrorKind::UnexpectedEof && self.established {
+            debug!(
+                "[peer:{}] peer closed the connection",
+                self.peer_username()
+            );
+            self.disconnect();
+        } else {
+            let username = self.peer_username();
+            error!(
+                "[peer:{}] Error reading from peer: {} (kind: {:?}). Disconnecting.",
+                username,
+                e,
+                e.kind()
+            );
+            self.disconnect_with_error(e);
+        }
     }
 
     /// Read what the socket holds, up to `READS_PER_TICK` buffers, so a big
     /// listing lands in a few ticks rather than a few minutes; the cap keeps
-    /// a peer that never stops sending from starving the mailbox. Only the
-    /// first read reports an error: a peer that sends its reply and hangs up
-    /// has still sent the reply, which must be parsed before the close is
-    /// acted on, and the socket says so again on the next call.
+    /// a peer that never stops sending from starving the mailbox. WouldBlock
+    /// and TimedOut are normal backpressure and end a later read; any other
+    /// error — a capacity failure after bytes were consumed, or EOF after a
+    /// reply — is returned so the caller can parse the reply before it
+    /// resolves the connection.
     fn drain(
         reader: &mut MessageReader,
         stream: &mut TcpStream,
     ) -> io::Result<()> {
         reader.read_from_socket(stream)?;
         for _ in 1..READS_PER_TICK {
-            if reader.read_from_socket(stream).is_err() {
-                break;
+            match reader.read_from_socket(stream) {
+                Ok(()) => {}
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -1031,3 +1048,208 @@ impl Actor for PeerActor {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use crate::peer::ConnectionType;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
+
+    const TEST_LIMIT: usize = 32;
+
+    fn socket_pair(read_timeout: Duration) -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ours = TcpStream::connect(addr).unwrap();
+        ours.set_read_timeout(Some(read_timeout)).unwrap();
+        let (theirs, _) = listener.accept().unwrap();
+        theirs.set_nodelay(true).unwrap();
+        (ours, theirs)
+    }
+
+    fn actor_on(
+        stream: TcpStream,
+    ) -> (PeerActor, Receiver<ClientOperation>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let peer = Peer::new(
+            "bob".to_string(),
+            ConnectionType::P,
+            "127.0.0.1".to_string(),
+            0,
+            None,
+            0,
+            0,
+            0,
+        );
+        let reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        let mut actor = PeerActor::new(
+            peer,
+            Some(stream),
+            Some(reader),
+            tx,
+            "me".to_string(),
+            7,
+        );
+        actor.connection_state = ConnectionState::Connected;
+        actor.established = true;
+        actor.initialize_dispatcher();
+        (actor, rx)
+    }
+
+    fn browse_request(payload_len: usize) -> Vec<u8> {
+        let mut payload = 4u32.to_le_bytes().to_vec();
+        payload.resize(payload_len, 0x61);
+        let mut bytes = (payload.len() as u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&payload);
+        bytes
+    }
+
+    fn expect_browse_request(rx: &Receiver<ClientOperation>) {
+        match rx.try_recv() {
+            Ok(ClientOperation::ShareListRequested { requester_key }) => {
+                assert_eq!(requester_key, "bob");
+            }
+            other => panic!("expected a browse request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fragmented_frame_is_emitted_only_when_the_last_byte_arrives() {
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(50));
+        let (mut actor, rx) = actor_on(ours);
+        let bytes = browse_request(8);
+
+        theirs.write_all(&bytes[..2]).unwrap();
+        actor.process_read();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(actor.reader.buffer_len(), 2);
+
+        theirs.write_all(&bytes[2..]).unwrap();
+        actor.process_read();
+        expect_browse_request(&rx);
+        assert_eq!(actor.reader.buffer_len(), 0);
+    }
+
+    #[test]
+    fn coalesced_frames_all_reach_the_client() {
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(50));
+        let (mut actor, rx) = actor_on(ours);
+        let wire = [browse_request(4), browse_request(6)].concat();
+        theirs.write_all(&wire).unwrap();
+
+        actor.process_read();
+        expect_browse_request(&rx);
+        expect_browse_request(&rx);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(actor.reader.buffer_len(), 0);
+    }
+
+    #[test]
+    fn a_near_limit_frame_then_another_frame_are_both_emitted() {
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(50));
+        let (mut actor, rx) = actor_on(ours);
+
+        theirs.write_all(&browse_request(TEST_LIMIT - 2)).unwrap();
+        actor.process_read();
+        expect_browse_request(&rx);
+        assert_eq!(actor.reader.buffer_len(), 0);
+
+        theirs.write_all(&browse_request(4)).unwrap();
+        actor.process_read();
+        expect_browse_request(&rx);
+        assert_eq!(actor.reader.buffer_len(), 0);
+    }
+
+    #[test]
+    fn a_slow_oversized_frame_is_rejected_without_a_payload() {
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(50));
+        let (mut actor, rx) = actor_on(ours);
+        theirs
+            .write_all(&((TEST_LIMIT + 1) as u32).to_le_bytes())
+            .unwrap();
+
+        actor.process_read();
+
+        let operations: Vec<_> = rx.try_iter().collect();
+        assert!(
+            !operations.iter().any(|op| matches!(
+                op,
+                ClientOperation::ShareListRequested { .. }
+            )),
+            "no frame may be emitted"
+        );
+        assert!(actor.stream.is_none());
+        assert!(
+            operations.iter().any(|op| matches!(
+                op,
+                ClientOperation::PeerDisconnected(7, _, Some(_))
+            )),
+            "expected an error disconnect, got {operations:?}"
+        );
+    }
+
+    #[test]
+    fn eof_after_a_complete_response_delivers_it_and_closes_cleanly() {
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(500));
+        let (mut actor, rx) = actor_on(ours);
+        theirs.write_all(&browse_request(4)).unwrap();
+        drop(theirs);
+
+        actor.process_read();
+
+        expect_browse_request(&rx);
+        assert!(actor.stream.is_none());
+        match rx.try_recv() {
+            Ok(ClientOperation::PeerDisconnected(7, _, None)) => {}
+            other => panic!("expected a clean disconnect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drain_surfaces_a_capacity_error_from_a_later_read() {
+        let (mut ours, mut theirs) = socket_pair(Duration::from_millis(500));
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        let response = browse_request(4);
+        theirs.write_all(&response).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            theirs.write_all(&[0x7f; 128]).unwrap();
+        });
+
+        let error = PeerActor::drain(&mut reader, &mut ours).unwrap_err();
+        writer.join().unwrap();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(reader.buffer_len(), response.len());
+        assert_eq!(
+            reader.extract_message().unwrap().unwrap().get_data(),
+            response
+        );
+    }
+
+    #[test]
+    fn a_later_capacity_error_closes_after_delivering_earlier_frames() {
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(500));
+        let (mut actor, rx) = actor_on(ours);
+        let response = browse_request(4);
+        theirs.write_all(&response).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            theirs.write_all(&[0x7f; 128]).unwrap();
+        });
+
+        actor.process_read();
+        writer.join().unwrap();
+
+        expect_browse_request(&rx);
+        assert_eq!(actor.reader.buffer_len(), 0);
+        assert!(actor.stream.is_none());
+        match rx.try_recv() {
+            Ok(ClientOperation::PeerDisconnected(7, _, Some(_))) => {}
+            other => panic!("expected an error disconnect, got {other:?}"),
+        }
+    }
+}
