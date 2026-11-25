@@ -12,7 +12,10 @@
 //!   permissions are the authentication, the same bargain Docker and ssh-agent
 //!   make, so a local client — an agent especially — needs no flags and no
 //!   token.
-//! * TCP, opt-in, always requiring the token in `<state-dir>/daemon.token`.
+//! * TCP, opt-in and loopback-only, always requiring the token in
+//!   `<state-dir>/daemon.token`. There is no TLS support: a non-loopback bind
+//!   is rejected before the listener opens rather than sending the token in
+//!   clear text.
 
 pub mod hub;
 /// Generates `docs/openrpc.json` from the wire types and checks it is current.
@@ -46,6 +49,10 @@ pub const TOKEN_NAME: &str = "daemon.token";
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_mins(1);
+/// After this many consecutive failed re-logins the daemon stops trying:
+/// a server refusing our credentials will not start accepting them because we
+/// asked again, and an endless retry is a thread and a socket forever.
+const MAX_RECONNECT_FAILURES: u32 = 12;
 
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
@@ -75,6 +82,8 @@ pub fn load_or_create_token(path: &Path) -> std::io::Result<String> {
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
     {
+        // An older token file may have been created under a permissive umask.
+        restrict(path)?;
         return Ok(existing);
     }
 
@@ -82,8 +91,22 @@ pub fn load_or_create_token(path: &Path) -> std::io::Result<String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{token}\n"))?;
-    restrict(path)?;
+    // Created 0600 from the first write, then renamed into place: there is no
+    // window in which another local user can read the token from a file made
+    // with the process umask.
+    let staging = path.with_extension(format!("token-{}", std::process::id()));
+    let _ = std::fs::remove_file(&staging);
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&staging)?;
+        file.write_all(format!("{token}\n").as_bytes())?;
+    }
+    std::fs::rename(&staging, path)?;
     Ok(token)
 }
 
@@ -258,8 +281,8 @@ ready — leave this running.
       soulseek-rs daemon stop
 ";
     const LOCAL_ONLY: &str =
-        "  To drive it from another machine, restart with --bind ADDR;
-  `soulseek-rs daemon token` prints the secret it needs.
+        "  Optional TCP control: --bind 127.0.0.1:PORT, reachable over an
+  encrypted tunnel; plaintext remote binds are refused.
 ";
 
     ctx.out.status(BANNER);
@@ -270,16 +293,16 @@ ready — leave this running.
     };
 
     ctx.out.status(&format!(
-        "  From another machine, point a client at {address} with
+        "  Over an encrypted tunnel, point a client at {address} with
   this token:
 
       {token}
 
-      soulseek-rs config set daemon <this-host>:PORT
+      soulseek-rs config set daemon 127.0.0.1:PORT
       soulseek-rs config set daemon_token <token above>
 
-  That port has no encryption. Keep it off the open internet and \
-         reach it over SSH instead.
+  This port is plaintext loopback only. Non-loopback binds are refused; \
+         reach remote machines over an encrypted tunnel to loopback.
 "
     ));
 }
@@ -326,24 +349,30 @@ fn reconnect_loop(
                 failures = 0;
                 announced = false;
             }
-            outcome => {
+            Ok(false) => {
+                out.warn(
+                    "the server rejected the login; the daemon will not retry \
+                     with rejected credentials — fix the password and restart",
+                );
+                return;
+            }
+            Err(e) => {
                 let wait = backoff(failures);
                 failures = failures.saturating_add(1);
+                if failures >= MAX_RECONNECT_FAILURES {
+                    out.warn(&format!(
+                        "login failed {failures} times ({e}); giving up on \
+                         reconnecting — restart to try again"
+                    ));
+                    return;
+                }
                 out.warn(&format!(
-                    "cannot log back in: {}; trying again in {}s",
-                    relogin_error(outcome),
+                    "cannot log back in: {e}; trying again in {}s",
                     wait.as_secs()
                 ));
                 wait_or_stop(wait, stop);
             }
         }
-    }
-}
-
-fn relogin_error(outcome: soulseek_rs::Result<bool>) -> String {
-    match outcome {
-        Ok(_) => "login rejected by the server".to_string(),
-        Err(e) => format!("login failed: {e}"),
     }
 }
 
@@ -528,6 +557,19 @@ mod tests {
         load_or_create_token(&path).expect("a token is minted");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the token is a secret on disk");
+    }
+
+    #[test]
+    fn an_existing_permissive_token_file_is_tightened_on_load() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join(TOKEN_NAME);
+        std::fs::write(&path, "abcdef\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert_eq!(load_or_create_token(&path).unwrap(), "abcdef");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

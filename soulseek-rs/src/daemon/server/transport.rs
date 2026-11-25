@@ -408,10 +408,37 @@ fn write_loop(stream: Stream, outbox: &Receiver<Response>) {
     }
 }
 
-/// Bind the TCP control port, refusing to come up rather than silently
-/// listening somewhere unintended.
+/// Bind the optional TCP control port.
+///
+/// Plaintext control is loopback-only: no TLS implementation exists here, so a non-loopback bind would expose the
+/// daemon token and every RPC in clear text. Refuse before opening the socket
+/// rather than warning after the damage is done. Use the default Unix socket
+/// for local control, or put a trusted tunnel in front of loopback for remote.
 pub fn bind_tcp(address: &str) -> std::io::Result<Listener> {
+    use std::net::ToSocketAddrs;
+
+    let addresses = address
+        .to_socket_addrs()
+        .map_err(|e| invalid_bind(address, &e.to_string()))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty()
+        || !addresses.iter().all(|addr| addr.ip().is_loopback())
+    {
+        return Err(invalid_bind(
+            address,
+            "no TLS implementation exists: remote plaintext control is not \
+             supported; bind a loopback address and use an encrypted tunnel, \
+             or use the local Unix socket",
+        ));
+    }
     TcpListener::bind(address).map(Listener::Tcp)
+}
+
+fn invalid_bind(address: &str, reason: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("refusing TCP daemon control bind '{address}': {reason}"),
+    )
 }
 
 /// Bind the Unix control socket with permissions that make it the local
@@ -451,5 +478,34 @@ fn remove_stale_socket(path: &std::path::Path) -> std::io::Result<()> {
             format!("a daemon is already listening on {}", path.display()),
         )),
         Err(_) => std::fs::remove_file(path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_remote_plaintext_control_bind_is_refused_before_listening() {
+        let error = bind_tcp("0.0.0.0:5030").err().expect("must refuse");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("refusing TCP daemon control bind"));
+        assert!(error.to_string().contains("no TLS"), "{error}");
+
+        // A loopback listener is still allowed; bind port 0 so the test does
+        // not fight another process for a fixed port.
+        let listener = bind_tcp("127.0.0.1:0").expect("loopback is allowed");
+        drop(listener);
+    }
+
+    #[test]
+    fn the_published_unix_socket_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let listener = bind_unix(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the socket is local authentication");
+        drop(listener);
     }
 }
