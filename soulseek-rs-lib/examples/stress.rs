@@ -848,6 +848,59 @@ fn compute_score(m: &Metrics, elapsed: Duration) -> Score {
     Score { total, parts }
 }
 
+/// Write evidence for this exact run, independent of whether it beats the
+/// stored high-score baseline. A reduced profile can prove functional closure
+/// without pretending to be the default throughput baseline.
+fn write_result(
+    path: &Path,
+    score: &Score,
+    cfg: &Config,
+    m: &Metrics,
+    elapsed: Duration,
+    peak_threads: u64,
+    peak_rss_kib: u64,
+) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let parts = score
+        .parts
+        .iter()
+        .map(|(n, v, _)| format!("    \"{n}\": {v:.4}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let body = format!(
+        "{{\n  \"revision\": \"{}\",\n  \"score\": {:.2},\n  \"parts\": {{\n{}\n  }},\n  \
+         \"load\": {{\n    \"peers\": {},\n    \"searches\": {},\n    \"downloads\": {},\n    \
+         \"leechers\": {},\n    \"browses\": {},\n    \"file_bytes\": {},\n    \
+         \"elapsed_secs\": {:.2}\n  }},\n  \"observed\": {{\n    \
+         \"seeders_online\": {},\n    \"mocks_offline\": {},\n    \
+         \"downloads_completed\": {},\n    \"uploads_completed\": {},\n    \
+         \"searches_answered\": {},\n    \"browses_answered\": {},\n    \
+         \"bytes\": {},\n    \"peak_threads\": {},\n    \"peak_rss_kib\": {}\n  }}\n}}\n",
+        git_revision(),
+        score.total,
+        parts,
+        cfg.peers,
+        cfg.searches,
+        cfg.downloads,
+        cfg.leechers,
+        cfg.browses,
+        cfg.file_bytes,
+        elapsed.as_secs_f64(),
+        Metrics::get(&m.peers_online),
+        Metrics::get(&m.mocks_offline),
+        Metrics::get(&m.downloads_completed),
+        Metrics::get(&m.uploads_completed),
+        Metrics::get(&m.searches_answered),
+        Metrics::get(&m.browses_answered),
+        Metrics::get(&m.bytes_downloaded) + Metrics::get(&m.bytes_uploaded),
+        peak_threads,
+        peak_rss_kib,
+    );
+    let _ = std::fs::write(path, body);
+}
+
 fn read_baseline(path: &Path) -> Option<f64> {
     let text = std::fs::read_to_string(path).ok()?;
     let idx = text.find("\"score\"")?;
@@ -1340,6 +1393,19 @@ fn main() {
         println!("  {name:<12} {:>6.1}%  x{weight:.2}", value * 100.0);
     }
     println!("  TOTAL        {:.2}/100", score.total);
+
+    if let Ok(result_path) = std::env::var("STRESS_RESULT_OUT") {
+        write_result(
+            Path::new(&result_path),
+            &score,
+            &cfg,
+            &metrics,
+            elapsed,
+            peak_threads.load(Ordering::Relaxed),
+            peak_rss.load(Ordering::Relaxed),
+        );
+        println!("  result written to {result_path}");
+    }
 
     let baseline_path = PathBuf::from(BASELINE);
     if let Some(prev) = read_baseline(&baseline_path) {

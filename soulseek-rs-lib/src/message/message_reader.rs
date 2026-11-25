@@ -66,8 +66,19 @@ impl MessageReader {
         &mut self,
         stream: &mut TcpStream,
     ) -> io::Result<()> {
-        let mut temp_buffer = [0; 1024]; // Temporary buffer for reading from the socket
-        let bytes_read = stream.read(&mut temp_buffer)?;
+        // Read only what the frame buffer can still hold. A chunk that
+        // straddles the end of one frame and the start of the next can be
+        // larger than the room left by the first, but each frame on its own is
+        // within the limit: taking the whole chunk here used to disconnect a
+        // peer for sending two legal frames back to back. The caller extracts
+        // completed frames before asking for more bytes.
+        let available = self.max_buffered_bytes.saturating_sub(self.buffer.len());
+        if available == 0 {
+            return Ok(());
+        }
+        let mut temp_buffer = [0; 1024];
+        let wanted = available.min(temp_buffer.len());
+        let bytes_read = stream.read(&mut temp_buffer[..wanted])?;
         // On a TCP socket a zero-byte read is the other end hanging up. Passing
         // that back as success left the caller polling a dead socket forever,
         // which is how a server that closes cleanly went unnoticed.
@@ -223,6 +234,45 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
+    /// The tail of a near-limit frame and a whole second frame may arrive in
+    /// one read. Both frames are individually legal, so the reader must take
+    /// only what fits, let the first be extracted, and then read the rest.
+    #[test]
+    fn a_near_limit_frame_and_a_coalesced_frame_are_both_emitted() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+
+        let first = frame(&[1u8; TEST_LIMIT - 2]);
+        // Hold back the last two payload bytes so they can arrive glued to
+        // the next frame in a single read.
+        theirs.write_all(&first[..first.len() - 2]).unwrap();
+        while reader.buffer_len() < first.len() - 2 {
+            reader.read_from_socket(&mut ours).unwrap();
+        }
+        assert_eq!(reader.buffer_len(), first.len() - 2);
+
+        let second = frame(&[9u8; 4]);
+        let mut combined = first[first.len() - 2..].to_vec();
+        combined.extend_from_slice(&second);
+        theirs.write_all(&combined).unwrap();
+
+        reader.read_from_socket(&mut ours).unwrap();
+        assert!(
+            (first.len()..=TEST_LIMIT + LENGTH_PREFIX_BYTES)
+                .contains(&reader.buffer_len())
+        );
+        assert_eq!(
+            reader.extract_message().unwrap().unwrap().get_data(),
+            first
+        );
+
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(
+            reader.extract_message().unwrap().unwrap().get_data(),
+            second
+        );
+    }
+
     /// A hangup has to reach the caller as an error. Reported as success it
     /// leaves the actors polling a socket that will never speak again, which is
     /// how a server that closed cleanly went unnoticed.
@@ -287,14 +337,18 @@ mod tests {
     }
 
     #[test]
-    fn one_byte_beyond_the_buffered_limit_is_rejected_by_append() {
+    fn a_socket_chunk_larger_than_the_buffer_is_capped() {
         let (mut ours, mut theirs) = socket_pair();
         let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
         theirs.write_all(&[0x7f; TEST_LIMIT + 5]).unwrap();
 
-        let error = reader.read_from_socket(&mut ours).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
-        assert_eq!(reader.buffer_len(), 0);
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.buffer_len(), TEST_LIMIT + 4);
+        assert_eq!(
+            reader.extract_message().unwrap_err().kind(),
+            ErrorKind::InvalidData,
+            "the announced size is still over the payload limit"
+        );
     }
 
     #[test]

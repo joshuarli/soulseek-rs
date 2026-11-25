@@ -64,6 +64,12 @@ pub trait SessionApi: Send + Sync {
         Err(soulseek_rs::SoulseekRs::NotConnected)
     }
 
+    /// Relogin with an extra stop signal, so a daemon shutdown cancels an
+    /// in-flight login wait instead of waiting out the server's verdict.
+    fn relogin_with_stop(&self, _stop: &AtomicBool) -> Result<bool> {
+        self.relogin()
+    }
+
     /// Search and wait out the window. Every implementation is
     /// `search_with_cancel` with nothing to cancel on.
     fn search(
@@ -208,6 +214,10 @@ impl SessionApi for Client {
 
     fn relogin(&self) -> Result<bool> {
         Self::login(self)
+    }
+
+    fn relogin_with_stop(&self, stop: &AtomicBool) -> Result<bool> {
+        Self::login_with_stop(self, stop)
     }
 
     fn search_with_cancel(

@@ -187,6 +187,20 @@ impl Client {
         client_context: &Arc<RwLock<ClientContext>>,
         username: &str,
     ) {
+        Self::fail_queued_downloads_with_reason(
+            client_context,
+            username,
+            "The user went offline",
+        );
+    }
+
+    /// Fail queued downloads with the cause that actually stopped them. A
+    /// broker admission refusal is retryable, unlike a peer that logged off.
+    pub(crate) fn fail_queued_downloads_with_reason(
+        client_context: &Arc<RwLock<ClientContext>>,
+        username: &str,
+        reason: &str,
+    ) {
         let mut context = match client_context.write_safe() {
             Ok(c) => c,
             Err(e) => {
@@ -204,7 +218,7 @@ impl Client {
             .map(|d| (d.token, d.sender.clone()))
             .collect();
         for (token, sender) in doomed {
-            let reason = Some("The user went offline".to_string());
+            let reason = Some(reason.to_string());
             let _ = sender.send(DownloadStatus::Failed(reason.clone()));
             context.update_download_with_status(
                 token,

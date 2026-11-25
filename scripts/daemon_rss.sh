@@ -2,13 +2,15 @@
 # Reproducible daemon RSS envelope under a mixed local Soulseek load.
 #
 #   scripts/daemon_rss.sh
-#   DAEMON_RSS_ROUNDS=16 scripts/daemon_rss.sh
+#   DAEMON_RSS_ROUNDS=8 scripts/daemon_rss.sh
 #
-# Starts a local soulfind, a seeder daemon, and the measured daemon, then drives
-# concurrent searches, browses and downloads in both directions. A sampler
-# records the measured daemon's RSS and thread count; the result is a machine
-# readable JSON file containing the git revision, the exact load, the peak RSS
-# and the measurement boundaries.
+# Starts a local soulfind, a seeder daemon, and the measured daemon, checks
+# that all three are ready, then drives one search, browse, download and
+# upload per round concurrently, with a distinct fixture per round. Every
+# operation must succeed and both copies must match the source bytes or the
+# run fails without producing acceptance evidence. The result records the
+# executed binary's identity, build profile, environment, git revision,
+# operation counts and peak RSS/thread count.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -18,6 +20,7 @@ BIN="${SOULSEEK_BIN:-$PWD/target/debug/soulseek-rs}"
 WORK="${DAEMON_RSS_WORK:-$PWD/.work/tmp/daemon-rss}"
 OUT="${DAEMON_RSS_OUT:-$WORK/daemon-rss.json}"
 ROUNDS="${DAEMON_RSS_ROUNDS:-8}"
+PROFILE="${DAEMON_RSS_PROFILE:-debug}"
 HELPER="$PWD/scripts/daemon_rss_helper.py"
 
 if [ ! -x "$SOULFIND_BIN" ]; then
@@ -64,12 +67,21 @@ fi
 rm -rf "$WORK"
 mkdir -p "$WORK/seed-share" "$WORK/load-share" "$WORK/seed-state" "$WORK/load-state" \
     "$WORK/seed-downloads" "$WORK/load-downloads"
-printf 'daemon-rss-fixture-0123456789' > "$WORK/seed-share/rss-file.bin"
-printf 'daemon-rss-fixture-0123456789' > "$WORK/load-share/rss-file.bin"
+
+i=0
+while [ "$i" -lt "$ROUNDS" ]; do
+    name=$(printf 'rss-file-%03d.bin' "$i")
+    printf 'daemon-rss-fixture-%s-%s' "$name" "$i" > "$WORK/seed-share/$name"
+    printf 'daemon-rss-fixture-%s-%s' "$name" "$i" > "$WORK/load-share/$name"
+    i=$((i + 1))
+done
 
 "$SOULFIND_BIN" -p "$SERVER_PORT" -d "$WORK/soulfind.db" > "$WORK/soulfind.log" 2>&1 &
 pids="$pids $!"
-sleep 1
+if ! "$HELPER" ready 127.0.0.1 "$SERVER_PORT" 10; then
+    printf 'daemon-rss: server never listened\n' >&2
+    exit 3
+fi
 
 SOULSEEK_STATE_DIR="$WORK/seed-state" "$BIN" --no-config --quiet \
     --server "127.0.0.1:$SERVER_PORT" --username rssseed --password pw \
@@ -83,30 +95,71 @@ SOULSEEK_STATE_DIR="$WORK/load-state" "$BIN" --no-config --quiet \
     --download-dir "$WORK/load-downloads" daemon > "$WORK/load.log" 2>&1 &
 LOAD_PID=$!
 pids="$pids $LOAD_PID"
-sleep 3
-
-if ! kill -0 "$LOAD_PID" 2>/dev/null; then
-    printf 'daemon-rss: measured daemon exited\n' >&2
-    exit 3
-fi
-
-"$HELPER" sample "$LOAD_PID" "$WORK/samples.txt" &
-pids="$pids $!"
 
 LOAD_SOCK="$WORK/load-state/daemon.sock"
 SEED_SOCK="$WORK/seed-state/daemon.sock"
 i=0
+while [ "$i" -lt 200 ]; do
+    if [ -S "$LOAD_SOCK" ] && [ -S "$SEED_SOCK" ] \
+        && "$BIN" --no-config --quiet --daemon "$LOAD_SOCK" daemon status > /dev/null 2>&1 \
+        && "$BIN" --no-config --quiet --daemon "$SEED_SOCK" daemon status > /dev/null 2>&1; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+if [ "$i" -ge 200 ] || ! kill -0 "$LOAD_PID" 2>/dev/null; then
+    printf 'daemon-rss: daemons never became ready\n' >&2
+    exit 3
+fi
+# Give the server time to register both sessions' shares before searching.
+sleep 2
+
+"$HELPER" identity "$BIN" "$PROFILE" "$WORK/identity.json"
+"$HELPER" sample "$LOAD_PID" "$WORK/samples.txt" &
+pids="$pids $!"
+
+operations=0
+i=0
 while [ "$i" -lt "$ROUNDS" ]; do
+    name=$(printf 'rss-file-%03d.bin' "$i")
     "$BIN" --no-config --quiet --daemon "$LOAD_SOCK" \
-        search rss-file --search-timeout 1 > /dev/null 2>&1 || true
+        search rss-file --search-timeout 10 > "$WORK/search-$i.txt" 2>&1 &
+    p1=$!
     "$BIN" --no-config --quiet --daemon "$LOAD_SOCK" \
-        browse rssseed > /dev/null 2>&1 || true
+        browse rssseed > "$WORK/browse-$i.txt" 2>&1 &
+    p2=$!
     "$BIN" --no-config --quiet --daemon "$LOAD_SOCK" \
-        download rssseed 'seed-share\rss-file.bin' --size 30 > /dev/null 2>&1 || true
+        download rssseed "seed-share\\$name" -t 20 > "$WORK/download-$i.txt" 2>&1 &
+    p3=$!
     "$BIN" --no-config --quiet --daemon "$SEED_SOCK" \
-        download rssload 'load-share\rss-file.bin' --size 30 > /dev/null 2>&1 || true
+        download rssload "load-share\\$name" -t 20 > "$WORK/upload-$i.txt" 2>&1 &
+    p4=$!
+
+    succeeded=0
+    for job in "$p1" "$p2" "$p3" "$p4"; do
+        if wait "$job"; then
+            succeeded=$((succeeded + 1))
+        else
+            printf 'daemon-rss: workload operation failed (round %s, pid %s)\n' "$i" "$job" >&2
+        fi
+    done
+    operations=$((operations + succeeded))
+    if [ "$succeeded" -ne 4 ]; then
+        printf 'daemon-rss: required workload failed; no evidence written\n' >&2
+        exit 4
+    fi
+    if [ ! -s "$WORK/search-$i.txt" ] \
+        || ! grep -F -q "$name" "$WORK/browse-$i.txt"; then
+        printf 'daemon-rss: search or browse returned no result for %s\n' "$name" >&2
+        exit 4
+    fi
     i=$((i + 1))
 done
 
 sleep 1
-"$HELPER" report "$WORK" "$OUT" "$ROUNDS" "$SERVER_PORT"
+if ! "$HELPER" verify "$WORK" "$ROUNDS"; then
+    printf 'daemon-rss: transfer bytes did not match; no evidence written\n' >&2
+    exit 4
+fi
+"$HELPER" report "$WORK" "$OUT" "$ROUNDS" "$SERVER_PORT" "$operations" "$WORK/identity.json"

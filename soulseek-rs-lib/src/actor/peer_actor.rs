@@ -648,6 +648,9 @@ impl PeerActor {
                         "[peer:{}] Error extracting message: {}. Disconnecting peer.",
                         username, e
                     );
+                    // An illegal frame after valid ones must not swallow the
+                    // operations those valid frames already dispatched.
+                    self.process_dispatcher_messages();
                     self.disconnect_with_error(e);
                     return;
                 }
@@ -1209,7 +1212,7 @@ mod framing_tests {
     }
 
     #[test]
-    fn drain_surfaces_a_capacity_error_from_a_later_read() {
+    fn drain_caps_a_later_chunk_instead_of_disconnecting() {
         let (mut ours, mut theirs) = socket_pair(Duration::from_millis(500));
         let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
         let response = browse_request(4);
@@ -1219,19 +1222,25 @@ mod framing_tests {
             theirs.write_all(&[0x7f; 128]).unwrap();
         });
 
-        let error = PeerActor::drain(&mut reader, &mut ours).unwrap_err();
-        writer.join().unwrap();
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(reader.buffer_len(), response.len());
+        PeerActor::drain(&mut reader, &mut ours).unwrap();
         assert_eq!(
             reader.extract_message().unwrap().unwrap().get_data(),
             response
         );
+        writer.join().unwrap();
+
+        // The oversized chunk is capped at the buffer budget, not treated as
+        // a reason to drop the connection before the next parse.
+        PeerActor::drain(&mut reader, &mut ours).unwrap();
+        assert!(reader.buffer_len() <= TEST_LIMIT + 4);
+        assert_eq!(
+            reader.extract_message().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
-    fn a_later_capacity_error_closes_after_delivering_earlier_frames() {
+    fn a_later_illegal_frame_closes_after_delivering_earlier_frames() {
         let (ours, mut theirs) = socket_pair(Duration::from_millis(500));
         let (mut actor, rx) = actor_on(ours);
         let response = browse_request(4);
@@ -1243,13 +1252,24 @@ mod framing_tests {
 
         actor.process_read();
         writer.join().unwrap();
+        actor.process_read();
 
-        expect_browse_request(&rx);
-        assert_eq!(actor.reader.buffer_len(), 0);
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                ClientOperation::ShareListRequested { requester_key }
+                    if requester_key == "bob"
+            )),
+            "the earlier frame must still be delivered: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                ClientOperation::PeerDisconnected(7, _, Some(_))
+            )),
+            "the illegal frame must close the connection: {messages:?}"
+        );
         assert!(actor.stream.is_none());
-        match rx.try_recv() {
-            Ok(ClientOperation::PeerDisconnected(7, _, Some(_))) => {}
-            other => panic!("expected an error disconnect, got {other:?}"),
-        }
     }
 }

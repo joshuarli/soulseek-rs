@@ -209,11 +209,24 @@ impl Client {
     /// [`SoulseekRs::Timeout`] can retry or give up, but it always regains
     /// control.
     pub fn login(&self) -> Result<bool> {
+        self.login_inner(None)
+    }
+
+    /// Log in, but also give up when `stop` is set. A daemon shuts down on a
+    /// flag it owns; a server that withholds the login verdict must not hold
+    /// the process open while the caller waits for its worker threads.
+    pub fn login_with_stop(&self, stop: &AtomicBool) -> Result<bool> {
+        self.login_inner(Some(stop))
+    }
+
+    fn login_inner(&self, stop: Option<&AtomicBool>) -> Result<bool> {
         info!("Logging in as {}", self.username);
         let Some(handle) = &self.server_handle else {
             return Err(SoulseekRs::NotConnected);
         };
-        if self.cancel.is_cancelled() {
+        if self.cancel.is_cancelled()
+            || stop.is_some_and(|stop| stop.load(Ordering::Relaxed))
+        {
             return Err(SoulseekRs::NotConnected);
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -229,7 +242,8 @@ impl Client {
             match rx.recv_timeout(LOGIN_POLL_INTERVAL) {
                 Ok(result) => return result,
                 Err(RecvTimeoutError::Timeout)
-                    if self.cancel.is_cancelled() =>
+                    if self.cancel.is_cancelled()
+                        || stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) =>
                 {
                     return Err(SoulseekRs::NotConnected);
                 }

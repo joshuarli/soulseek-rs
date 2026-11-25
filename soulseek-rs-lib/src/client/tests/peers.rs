@@ -242,6 +242,200 @@ fn a_clean_disconnect_keeps_queued_uploads_an_error_drops_them() {
     }
 }
 
+/// The real login handler reports rejection as `Err(AuthenticationFailed)`.
+/// This server accepts the first login, drops the session, and rejects the
+/// relogin, so the reconnect policy can be tested against the real contract.
+#[test]
+fn a_rejected_relogin_reaches_the_caller_as_authentication_failed() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn frame(code: u32, body: &[u8]) -> Vec<u8> {
+        let mut bytes = (body.len() as u32 + 4).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&code.to_le_bytes());
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut logins = 0;
+        while logins < 2 {
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut body = vec![0u8; u32::from_le_bytes(length) as usize];
+            stream.read_exact(&mut body).unwrap();
+            if u32::from_le_bytes(body[..4].try_into().unwrap()) != 1 {
+                continue; // SetWaitPort and the other post-login messages.
+            }
+            let accepted = logins == 0;
+            logins += 1;
+            let reply = if accepted {
+                let greeting = b"welcome";
+                let mut body = vec![1];
+                body.extend_from_slice(&(greeting.len() as u32).to_le_bytes());
+                body.extend_from_slice(greeting);
+                frame(1, &body)
+            } else {
+                frame(1, &[0])
+            };
+            stream.write_all(&reply).unwrap();
+        }
+        // Keep the socket open until the client has read both verdicts.
+        thread::sleep(Duration::from_secs(3));
+    });
+
+    let mut client = Client::with_settings(ClientSettings {
+        username: "relogin".into(),
+        password: "pw".into(),
+        server_address: PeerAddress::new("127.0.0.1".into(), address.port()),
+        enable_listen: false,
+        listen_port: 0,
+        shared_directories: Vec::new(),
+        accept_children: false,
+        version: ClientVersion::default(),
+    });
+    client.connect().expect("connect");
+    assert!(client.login().expect("first login"));
+
+    let result = client.login();
+    assert!(
+        matches!(result, Err(SoulseekRs::AuthenticationFailed)),
+        "rejection must reach the policy as the real error: {result:?}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn an_active_login_wait_ends_when_stop_is_set() {
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    // A local server that accepts the connection and withholds the verdict.
+    let server = thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        thread::sleep(Duration::from_secs(3));
+    });
+
+    let mut client = Client::with_settings(ClientSettings {
+        username: "cancelled".into(),
+        password: "pw".into(),
+        server_address: PeerAddress::new("127.0.0.1".into(), address.port()),
+        enable_listen: false,
+        listen_port: 0,
+        shared_directories: Vec::new(),
+        accept_children: false,
+        version: ClientVersion::default(),
+    });
+    client.connect().expect("connect");
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+    let started = Instant::now();
+    let result = client.login_with_stop(&stop);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "stop must cancel the login wait instead of waiting for the server"
+    );
+    assert!(matches!(result, Err(SoulseekRs::NotConnected)), "{result:?}");
+    server.join().unwrap();
+}
+
+#[test]
+fn broker_admission_refusal_fails_queued_downloads_with_a_retryable_cause() {
+    let client = Client::new("me", "p");
+    let (ops, ops_rx) = mpsc::channel();
+    Client::listen_to_client_operations(
+        ops_rx,
+        client.context.clone(),
+        "me".into(),
+    );
+    let (sender, receiver) = mpsc::channel();
+    {
+        let mut ctx = client.context.write().unwrap();
+        for token in 0..super::super::MAX_PENDING_CONNECTS {
+            assert!(ctx.add_pending_connect(token as u32, "ghost".into()));
+        }
+        ctx.add_download(download(
+            "peer",
+            "f.mp3",
+            7,
+            DownloadStatus::Queued,
+            sender,
+        ));
+    }
+
+    ops.send(ClientOperation::PeerConnectFailed(
+        1,
+        "peer".into(),
+        None,
+    ))
+    .unwrap();
+    ops.send(ClientOperation::OwnPrivileges(7)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.own_privilege_seconds() != Some(7) {
+        assert!(Instant::now() < deadline, "ops loop never caught up");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    match receiver.try_recv() {
+        Ok(DownloadStatus::Failed(Some(reason))) => {
+            assert!(reason.contains("retry"), "{reason}");
+        }
+        other => panic!("queued download was stranded: {other:?}"),
+    }
+    assert!(matches!(
+        client
+            .context
+            .read()
+            .unwrap()
+            .get_download_by_token(7)
+            .expect("download still recorded")
+            .status,
+        DownloadStatus::Failed(_)
+    ));
+
+    // The refusal consumed no token: freeing one slot lets the next attempt
+    // be admitted, so its queued download is no longer failed on sight.
+    assert!(client.context.write().unwrap().take_pending_connect(0).is_some());
+    let (retry_sender, retry_receiver) = mpsc::channel();
+    client.context.write().unwrap().add_download(download(
+        "peer",
+        "f2.mp3",
+        8,
+        DownloadStatus::Queued,
+        retry_sender,
+    ));
+    ops.send(ClientOperation::PeerConnectFailed(
+        2,
+        "peer".into(),
+        None,
+    ))
+    .unwrap();
+    ops.send(ClientOperation::OwnPrivileges(8)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.own_privilege_seconds() != Some(8) {
+        assert!(Instant::now() < deadline, "ops loop never caught up");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        retry_receiver.recv_timeout(Duration::from_millis(200)).is_err(),
+        "an admitted retry must not be failed by the saturation branch"
+    );
+}
+
 #[test]
 fn a_pending_connect_expires_after_the_broker_timeout() {
     let mut context = ClientContext::new();

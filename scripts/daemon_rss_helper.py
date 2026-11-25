@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helpers for scripts/daemon_rss.sh: free ports, process sampling, and JSON.
+"""Helpers for scripts/daemon_rss.sh: ports, readiness, sampling, verification.
 
 The sampler supports macOS and Linux, the two platforms this repository runs
 on. Other platforms report zero counters with a warning rather than a value
@@ -7,8 +7,10 @@ in the wrong unit.
 """
 
 import ctypes
+import hashlib
 import json
 import os
+import platform
 import socket
 import subprocess
 import sys
@@ -53,6 +55,66 @@ def free_ports(count: int) -> list[int]:
     return ports
 
 
+def ready(host: str, port: int, timeout: float) -> bool:
+    """Whether a TCP listener accepts on `host:port` before `timeout`."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a file's bytes without shelling out to a platform tool."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_transfers(work: Path, rounds: int) -> int:
+    """Check both directions copied every distinct fixture byte-for-byte."""
+    for round_no in range(rounds):
+        name = f"rss-file-{round_no:03}.bin"
+        expected = sha256_file(work / "seed-share" / name)
+        for side in ("seed-downloads", "load-downloads"):
+            received = work / side / name
+            if not received.is_file():
+                print(f"daemon-rss: missing {received}", file=sys.stderr)
+                return 1
+            if sha256_file(received) != expected:
+                print(f"daemon-rss: corrupt {received}", file=sys.stderr)
+                return 1
+    return 0
+
+
+def identity(binary: Path, profile: str, output: Path) -> None:
+    """Record which binary, build and environment the evidence describes."""
+    version = subprocess.run(
+        [str(binary), "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    record = {
+        "binary": str(binary),
+        "sha256": sha256_file(binary),
+        "version": version,
+        "build_profile": profile,
+        "environment": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+        },
+    }
+    output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+
 def linux_counters(pid: int) -> tuple[int, int]:
     """Resident KiB and thread count from Linux's process status file."""
     fields: dict[str, str] = {}
@@ -88,7 +150,7 @@ def darwin_counters(pid: int) -> tuple[int, int]:
 
 
 def counters(pid: int) -> tuple[int, int]:
-    """Peak-independent RSS and thread count for `pid`, in KiB and threads."""
+    """RSS and thread count for `pid`, in KiB and threads."""
     if sys.platform == "darwin":
         return darwin_counters(pid)
     if sys.platform.startswith("linux"):
@@ -137,7 +199,14 @@ def revision() -> str:
     return result.stdout.strip()
 
 
-def report(work: Path, output: Path, rounds: int, server_port: int) -> None:
+def report(
+    work: Path,
+    output: Path,
+    rounds: int,
+    server_port: int,
+    operations: int,
+    binary_record: Path,
+) -> None:
     """Write the machine-readable measurement envelope to `output`."""
     rows: list[tuple[int, int]] = []
     for line in (work / "samples.txt").read_text(encoding="utf-8").splitlines():
@@ -146,11 +215,14 @@ def report(work: Path, output: Path, rounds: int, server_port: int) -> None:
             rows.append((int(parts[0]), int(parts[1])))
     observed = {
         "revision": revision(),
+        "executed": json.loads(binary_record.read_text(encoding="utf-8")),
         "load": {
             "rounds": rounds,
+            "operations_succeeded": operations,
+            "operations_required": rounds * 4,
             "operations_per_round": ["search", "browse", "download", "upload"],
-            "seeds": 1,
-            "share_bytes": 30,
+            "distinct_fixture_bytes": 30,
+            "verified_in_both_directions": True,
             "server_port": server_port,
         },
         "observed": {
@@ -169,9 +241,10 @@ def report(work: Path, output: Path, rounds: int, server_port: int) -> None:
     }
     output.write_text(json.dumps(observed, indent=2) + "\n", encoding="utf-8")
     print(
-        "daemon-rss: peak {rss} KiB, {threads} threads -> {out}".format(
+        "daemon-rss: peak {rss} KiB, {threads} threads, {ops} operations -> {out}".format(
             rss=observed["observed"]["peak_rss_kib"],
             threads=observed["observed"]["peak_threads"],
+            ops=operations,
             out=output,
         )
     )
@@ -182,13 +255,32 @@ def main(args: list[str]) -> int:
     if args == ["ports"]:
         print(*free_ports(3))
         return 0
+    if len(args) == 4 and args[0] == "ready":
+        return 0 if ready(args[1], int(args[2]), float(args[3])) else 1
     if len(args) == 3 and args[0] == "sample":
         sample(int(args[1]), Path(args[2]))
         return 0
-    if len(args) == 5 and args[0] == "report":
-        report(Path(args[1]), Path(args[2]), int(args[3]), int(args[4]))
+    if len(args) == 3 and args[0] == "verify":
+        return verify_transfers(Path(args[1]), int(args[2]))
+    if len(args) == 4 and args[0] == "identity":
+        identity(Path(args[1]), args[2], Path(args[3]))
         return 0
-    print("usage: daemon_rss_helper.py ports|sample PID OUT|report WORK OUT ROUNDS PORT", file=sys.stderr)
+    if len(args) == 7 and args[0] == "report":
+        report(
+            Path(args[1]),
+            Path(args[2]),
+            int(args[3]),
+            int(args[4]),
+            int(args[5]),
+            Path(args[6]),
+        )
+        return 0
+    print(
+        "usage: daemon_rss_helper.py ports|ready HOST PORT TIMEOUT|"
+        "sample PID OUT|verify WORK ROUNDS|identity BIN PROFILE OUT|"
+        "report WORK OUT ROUNDS PORT OPS IDENTITY",
+        file=sys.stderr,
+    )
     return 2
 
 

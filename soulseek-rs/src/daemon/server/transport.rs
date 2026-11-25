@@ -15,8 +15,9 @@ use crate::output::Exit;
 use deser_value::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
@@ -38,17 +39,114 @@ pub(super) const MAX_LINE: u64 = 1 << 20;
 /// connection open for events without sending anything.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long to wait before accepting again after a failure.
-/// A nonblocking accept with nothing pending must still check the stop flag,
-/// but sleeping the full error backoff here would stall bursts of short-lived
-/// clients long enough to exhaust the connection cap.
-const ACCEPT_POLL: Duration = Duration::from_millis(1);
+/// How long to wait before accepting again after a failure. The idle loop
+/// waits on OS readiness instead of sleeping; this is only the error path.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Backstop for a stop flag set without going through the wakeup pipe. The
+/// daemon's own shutdown writes to the pipe, so an idle listener wakes at once;
+/// a test holding only the flag still sees it within this interval.
+const STOP_CHECK_INTERVAL_MS: libc::c_int = 100;
+
+/// An explicit wakeup for listeners parked in readiness waiting. The write end
+/// is shared by all listeners; each gets its own readable duplicate.
+pub struct ListenerWakeup {
+    write: Arc<OwnedFd>,
+}
+
+impl ListenerWakeup {
+    pub(crate) fn new() -> std::io::Result<(Self, OwnedFd)> {
+        let mut fds = [0i32; 2];
+        // SAFETY: `pipe` writes two owned descriptors into `fds`.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: both descriptors are newly owned by this call.
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        for fd in [&read, &write] {
+            // SAFETY: `fd` is an owned descriptor from the pipe above.
+            unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        }
+        Ok((Self { write: Arc::new(write) }, read))
+    }
+
+    pub(crate) fn wake(&self) {
+        let byte = [1u8];
+        // SAFETY: the write end is an owned pipe descriptor and `byte` is a
+        // live one-byte buffer; a full pipe simply returns EAGAIN.
+        let _ = unsafe {
+            libc::write(
+                self.write.as_raw_fd(),
+                byte.as_ptr().cast::<libc::c_void>(),
+                1,
+            )
+        };
+    }
+}
 
 /// How many control connections may be open at once. Far above any real use
 /// (a TUI, a few scripts, an agent), and low enough that an unauthenticated
 /// peer cannot exhaust the daemon's threads.
 pub(super) const MAX_CONNECTIONS: usize = 64;
+
+/// Wait for a pending connection or an explicit stop. The bounded timeout is
+/// only a backstop for stop flags set without the pipe; the daemon's own
+/// shutdown writes to the pipe and ends the wait immediately.
+fn wait_for_readiness(
+    listener_fd: i32,
+    wake_fd: Option<i32>,
+    stop: &AtomicBool,
+) -> bool {
+    let count = if wake_fd.is_some() { 2 } else { 1 };
+    let mut fds = [
+        libc::pollfd {
+            fd: listener_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake_fd.unwrap_or(-1),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // SAFETY: `fds` holds `count` initialized pollfd entries for the
+        // lifetime of the call, and the descriptors are owned by this process.
+        let ready = unsafe {
+            libc::poll(
+                fds.as_mut_ptr(),
+                count as libc::nfds_t,
+                STOP_CHECK_INTERVAL_MS,
+            )
+        };
+        if ready < 0
+            && std::io::Error::last_os_error().kind()
+                == std::io::ErrorKind::Interrupted
+        {
+            continue;
+        }
+        break;
+    }
+    if count == 2 && fds[1].revents & libc::POLLIN != 0 {
+        let mut byte = [0u8; 8];
+        // SAFETY: the read end is an owned nonblocking pipe descriptor.
+        loop {
+            let n = unsafe {
+                libc::read(
+                    fds[1].fd,
+                    byte.as_mut_ptr().cast::<libc::c_void>(),
+                    byte.len(),
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+        }
+    }
+    !stop.load(Ordering::Relaxed)
+}
 
 /// Where control connections arrive.
 ///
@@ -141,10 +239,24 @@ impl Write for Stream {
 }
 
 impl Listener {
+    fn fd(&self) -> i32 {
+        match self {
+            Self::Unix(listener) => listener.as_raw_fd(),
+            Self::Tcp(listener) => listener.as_raw_fd(),
+        }
+    }
+
     /// Accept until the daemon is stopped, handing each connection to its own
-    /// thread. The loop owns no thread of its own: its caller holds the
-    /// handle and joins it on shutdown.
-    pub fn serve(self, daemon: Arc<Daemon>, stop: &AtomicBool) {
+    /// thread. An idle listener waits on OS readiness rather than spinning;
+    /// shutdown writes to `wake_read`'s other end so the wait ends at once.
+    /// `polls` counts readiness waits for the idle-wakeup regression test.
+    pub fn serve(
+        self,
+        daemon: Arc<Daemon>,
+        stop: &AtomicBool,
+        wake_read: Option<OwnedFd>,
+        polls: Option<Arc<AtomicU64>>,
+    ) {
         if let Err(e) = self.set_nonblocking(true) {
             soulseek_rs::error!(
                 "control listener cannot be made nonblocking: {e}; its \
@@ -152,15 +264,23 @@ impl Listener {
             );
             return;
         }
-        while !stop.load(Ordering::Relaxed) {
+        loop {
+            if !wait_for_readiness(
+                self.fd(),
+                wake_read.as_ref().map(OwnedFd::as_raw_fd),
+                stop,
+            ) {
+                break;
+            }
+            if let Some(polls) = &polls {
+                polls.fetch_add(1, Ordering::Relaxed);
+            }
             match self.accept() {
                 Ok(stream) => {
                     stream.make_blocking();
                     spawn_connection(stream, Arc::clone(&daemon));
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(ACCEPT_POLL);
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => {
                     soulseek_rs::warn!("control accept failed: {e}");
                     std::thread::sleep(ACCEPT_BACKOFF);

@@ -576,13 +576,14 @@ mod transport;
 
 pub use transport::bind_unix;
 pub use transport::{Listener, bind_tcp};
+pub(crate) use transport::ListenerWakeup;
 
 #[cfg(test)]
 mod tests {
     use super::super::proto::{CODE_METHOD_NOT_FOUND, CODE_PARSE};
     use super::transport::{
-        Listener, MAX_CONNECTIONS, MAX_LINE, accepts, answer, bind_tcp,
-        constant_time_eq,
+        Listener, ListenerWakeup, MAX_CONNECTIONS, MAX_LINE, accepts, answer,
+        bind_tcp, constant_time_eq,
     };
     use super::*;
     use deser_value::value;
@@ -625,6 +626,8 @@ mod tests {
         address: std::net::SocketAddr,
         daemon: Arc<Daemon>,
         stop: Arc<std::sync::atomic::AtomicBool>,
+        wakeup: ListenerWakeup,
+        polls: Arc<std::sync::atomic::AtomicU64>,
         task: Option<std::thread::JoinHandle<()>>,
     }
 
@@ -634,6 +637,7 @@ mod tests {
                 true,
                 std::sync::atomic::Ordering::Relaxed,
             );
+            self.wakeup.wake();
             if let Some(task) = self.task.take()
                 && let Err(panic) = task.join()
             {
@@ -652,13 +656,18 @@ mod tests {
         let served = Arc::clone(&daemon);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let loop_stop = Arc::clone(&stop);
+        let (wakeup, wake_read) = ListenerWakeup::new().expect("wakeup pipe");
+        let polls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let loop_polls = Arc::clone(&polls);
         let task = std::thread::spawn(move || {
-            listener.serve(served, &loop_stop);
+            listener.serve(served, &loop_stop, Some(wake_read), Some(loop_polls));
         });
         TestDaemon {
             address,
             daemon,
             stop,
+            wakeup,
+            polls,
             task: Some(task),
         }
     }
@@ -781,6 +790,20 @@ mod tests {
         assert!(
             std::net::TcpStream::connect(address).is_err(),
             "the listener thread must end with its owner"
+        );
+    }
+
+    #[test]
+    fn an_idle_listener_waits_on_readiness_not_a_polling_alarm() {
+        let server = serve_on_port_zero("secret");
+        // Well under the 100 ms stop-check backstop: a 1 ms sleep loop would
+        // register hundreds of polls in this interval.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let polls = server.polls.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            polls <= 1,
+            "idle accept loop woke {polls} times in 30 ms; it should be parked \
+             in readiness waiting"
         );
     }
 

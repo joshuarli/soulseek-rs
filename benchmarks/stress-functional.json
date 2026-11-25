@@ -1,0 +1,31 @@
+{
+  "revision": "1ee07f1fe616253fd40e2e5756c205855b3cba8e",
+  "score": 85.01,
+  "parts": {
+    "downloads": 1.0000,
+    "uploads": 1.0000,
+    "searches": 1.0000,
+    "browses": 1.0000,
+    "throughput": 0.0010
+  },
+  "load": {
+    "peers": 32,
+    "searches": 16,
+    "downloads": 16,
+    "leechers": 8,
+    "browses": 8,
+    "file_bytes": 65536,
+    "elapsed_secs": 3.10
+  },
+  "observed": {
+    "seeders_online": 32,
+    "mocks_offline": 0,
+    "downloads_completed": 16,
+    "uploads_completed": 8,
+    "searches_answered": 16,
+    "browses_answered": 8,
+    "bytes": 1572864,
+    "peak_threads": 178,
+    "peak_rss_kib": 9776
+  }
+}

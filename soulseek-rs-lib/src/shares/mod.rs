@@ -806,12 +806,13 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         let target = file.clone();
-        let worker = thread::spawn(move || {
+        drop(thread::spawn(move || {
             let _ = tx.send(open_contained(&target).map(|_| ()));
-        });
-        let outcome = rx.recv_timeout(Duration::from_secs(3));
-        worker.join().expect("the opening thread did not panic");
-        match outcome {
+        }));
+        // Do not join on timeout: joining a worker wedged in a blocking open
+        // would turn this deadline test into a hang when the production fix
+        // regresses. The detached worker dies with the test process.
+        match rx.recv_timeout(Duration::from_secs(3)) {
             Ok(result) => assert_eq!(
                 result.expect_err("a FIFO is not the indexed file").kind(),
                 std::io::ErrorKind::InvalidData

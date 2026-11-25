@@ -137,7 +137,15 @@ impl Client {
                     }
                 };
                 if !accepted {
-                    debug!("[client] too many brokered connects; dropping one");
+                    // No token was inserted, so no `ConnectToPeer` reply can
+                    // ever resolve a queued download's wait. Fail it now with
+                    // a retryable cause instead of stranding the caller.
+                    debug!("[client] too many brokered connects; failing queued downloads");
+                    Self::fail_queued_downloads_with_reason(
+                        client_context,
+                        &username,
+                        "Too many brokered connections; retry the download",
+                    );
                     return;
                 }
                 let Some(sender) = server_sender else {

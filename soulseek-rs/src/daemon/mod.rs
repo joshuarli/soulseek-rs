@@ -245,13 +245,18 @@ pub fn run(
         ));
     }
 
+    let (wakeup, wake_read) = server::ListenerWakeup::new()
+        .expect("a wakeup pipe for the control listeners");
     for listener in listeners {
         let daemon = Arc::clone(&daemon);
         let stop = Arc::clone(&stop);
+        let wake_read = wake_read
+            .try_clone()
+            .expect("a per-listener wakeup descriptor");
         tasks.push((
             "control listener",
             std::thread::spawn(move || {
-                listener.serve(daemon, &stop);
+                listener.serve(daemon, &stop, Some(wake_read), None);
             }),
         ));
     }
@@ -276,6 +281,9 @@ pub fn run(
 
     save(&store, session.client.as_ref(), &hub, &daemon);
     ctx.out.status("stopping");
+    // Wake listeners before joining: they are parked in readiness waiting and
+    // would otherwise spend the whole stop-check interval still accepting.
+    wakeup.wake();
     // Joining keeps a half-written state file from racing the process exit
     // and leaves no listener or reconnect thread behind.
     for (name, task) in tasks {
@@ -349,7 +357,7 @@ const fn should_reconnect(loss: Option<SessionLoss>, owned: bool) -> bool {
 trait ReconnectSession {
     fn is_owned(&self) -> bool;
     fn loss(&self) -> Option<SessionLoss>;
-    fn relogin(&self) -> soulseek_rs::Result<bool>;
+    fn relogin(&self, stop: &AtomicBool) -> soulseek_rs::Result<bool>;
 }
 
 impl ReconnectSession for Arc<dyn SessionApi> {
@@ -359,8 +367,8 @@ impl ReconnectSession for Arc<dyn SessionApi> {
     fn loss(&self) -> Option<SessionLoss> {
         SessionApi::session_loss(self.as_ref())
     }
-    fn relogin(&self) -> soulseek_rs::Result<bool> {
-        SessionApi::relogin(self.as_ref())
+    fn relogin(&self, stop: &AtomicBool) -> soulseek_rs::Result<bool> {
+        SessionApi::relogin_with_stop(self.as_ref(), stop)
     }
 }
 
@@ -454,7 +462,7 @@ fn reconnect<S: ReconnectSession, R: ReconnectReporter, T: ReconnectTimings>(
             ));
             announced = true;
         }
-        match session.relogin() {
+        match session.relogin(stop) {
             Ok(true) => {
                 reporter.status(&format!("logged back in to {address}"));
                 rejoin();
@@ -470,6 +478,18 @@ fn reconnect<S: ReconnectSession, R: ReconnectReporter, T: ReconnectTimings>(
                 return;
             }
             Err(e) => {
+                // The server's rejection arrives as an error, not as
+                // `Ok(false)`. Retrying it would keep fighting a name we
+                // cannot log into, so it is terminal just like a refusal
+                // reported as a verdict.
+                if matches!(e, soulseek_rs::SoulseekRs::AuthenticationFailed) {
+                    reporter.warn(
+                        "the server rejected the login; the daemon will not \
+                         retry with rejected credentials — fix the password \
+                         and restart",
+                    );
+                    return;
+                }
                 if !slow && failures >= FAST_RETRY_BUDGET {
                     slow = true;
                     reporter.status(&format!(
@@ -621,7 +641,7 @@ fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, AtomicUsize};
 
     #[test]
     fn a_token_is_minted_once_and_then_reused() {
@@ -757,7 +777,7 @@ mod tests {
         fn loss(&self) -> Option<SessionLoss> {
             *self.loss.lock().expect("session loss")
         }
-        fn relogin(&self) -> soulseek_rs::Result<bool> {
+        fn relogin(&self, _stop: &AtomicBool) -> soulseek_rs::Result<bool> {
             self.attempts.fetch_add(1, Ordering::Relaxed);
             let outcome = self
                 .outcomes
@@ -773,12 +793,15 @@ mod tests {
     }
 
     /// A stub clock never sleeps, so a test cannot spend wall time waiting.
-    /// It also stops a test whose script would otherwise keep it alive.
+    /// It also stops a test whose script would otherwise keep it alive — zero
+    /// duration polls must be counted too, or a zero backoff spins forever.
     const MAX_SCRIPTED_WAITS: usize = 64;
+    const MAX_SCRIPTED_POLLS: usize = 256;
 
     #[derive(Default)]
     struct ScriptedTimings {
         waits: Mutex<Vec<Duration>>,
+        polls: AtomicUsize,
     }
 
     impl ReconnectTimings for ScriptedTimings {
@@ -786,6 +809,11 @@ mod tests {
             Duration::ZERO
         }
         fn wait(&self, duration: Duration, stop: &AtomicBool) -> bool {
+            if self.polls.fetch_add(1, Ordering::Relaxed) >= MAX_SCRIPTED_POLLS
+            {
+                stop.store(true, Ordering::Relaxed);
+                return false;
+            }
             let mut waits = self.waits.lock().expect("waits");
             if !duration.is_zero() {
                 waits.push(duration);
@@ -861,8 +889,10 @@ mod tests {
 
     #[test]
     fn rejected_credentials_are_not_retried() {
+        // Production reports a rejected login as `Err(AuthenticationFailed)`;
+        // `Ok(false)` is not the contract this policy has to honour.
         let session = ScriptedSession::with([
-            Ok(false),
+            Err(soulseek_rs::SoulseekRs::AuthenticationFailed),
             Ok(true),
         ]);
         let reporter = RecordingReporter::default();
@@ -913,8 +943,8 @@ mod tests {
             fn loss(&self) -> Option<SessionLoss> {
                 self.0.loss()
             }
-            fn relogin(&self) -> soulseek_rs::Result<bool> {
-                self.0.relogin()
+            fn relogin(&self, stop: &AtomicBool) -> soulseek_rs::Result<bool> {
+                self.0.relogin(stop)
             }
         }
         let session = Borrowed(ScriptedSession::with([Ok(true)]));
