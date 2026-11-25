@@ -17,6 +17,9 @@ Next: 9
       `SOULSEEK_E2E_REQUIRED=1` suite passed on macOS with two test threads
       (one earlier run failed only under default parallelism, when 100
       concurrent soulfind instances exhausted this host).
-- [ ] Independent-client (Nicotine+) interoperability: GUI client not
-      available in this environment; unverified.
+- [ ] Independent-client (Nicotine+) interoperability: headless 3.3.11 in an
+      isolated venv connected to local soulfind and its shared file was found
+      by this client's `search`; a direct browse/download into that client was
+      blocked because soulfind reported its address as `0.0.0.0:0` in this
+      setup. Both-directions verification still open.
 - [ ] Public-network smoke test: no purpose-provided credentials; not run.

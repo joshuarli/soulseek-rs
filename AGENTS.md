@@ -58,10 +58,16 @@ a separate campaign document.
 `make clean` removes this checkout’s build output in `./target`. It refuses symlinks and ordinary files at those paths.
 
 - `make test` (CI: `.github/workflows/ci.yml`, on `pull_request` and pushes to
-  `main`): 1035 passed, 2 ignored, including the five PTY snapshot frames;
+  `main`): 1087 passed, 2 ignored, including the five PTY snapshot frames;
   cold 251.87s, warm 27s to 64s on a busy macOS host with four build jobs.
   `make lint` (`lint.yml`): cold 180.94s, warm 39s to 86s, clippy on all targets
   with `-D warnings`.
+- Server-backed verification with `SOULFIND_BIN` and
+  `SOULSEEK_E2E_REQUIRED=1`: one `cli_e2e` case,
+  `json_records_carry_every_extra_field_the_readme_names`, times out waiting
+  for a login answer on this host; the same failure reproduces on the
+  pre-campaign commit, so it is not a campaign regression. The rest of the
+  suite passes.
 - Tiers (warm): unit about 770 tests (`soulseek-rs`, `soulseek-rs-lib`; 1s each); local-socket tests (daemon transport bounds in
   `src/daemon/server`, `resume_e2e.rs`, `persist_e2e.rs`); server e2e 208 tests
   (`cli_e2e`, `daemon_protocol_e2e`, `tui_e2e`, lib `e2e`: client and peer

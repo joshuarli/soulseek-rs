@@ -109,6 +109,21 @@ client's own trace, which is how each ceiling below was actually found.
 | One download vanishing per few hundred             | Token was `md5(filename)`, and the store deletes *every* entry with a token — same filename from two peers destroyed both |
 | Uploads dropped after the peer accepted            | Server answered `GetPeerAddress` with port 0; the client cached it and dialled it |
 
+## Resource envelope — measured and theoretical
+
+The deterministic benchmarks and `scripts/stress.sh` cover one frame draw, one
+parse, and a mixed network load. They do not establish a laptop-wide memory
+bound. Actor mailboxes and the client operation channel are still unbounded,
+and 512 allowed peers times a 16 MiB receive-buffer allowance is an 8 GiB
+*allowance*, not measured RSS. Queue admission limits apply after work has
+entered those channels. These remain open work, not a proven resource budget.
+
+Daemon control-listener tests start and stop listeners through an owning guard;
+repeated runs stayed between 26 and 29 MiB maximum RSS with no thread growth.
+That is a lifecycle regression check, not an idle-daemon or saturation
+measurement. A checked-in, machine-readable daemon/server workload identifying
+exact commits, toolchain and fixture sizes is still needed.
+
 ## Requirements
 
 A soulfind binary (`SOULFIND_BIN`, defaulted in `scripts/stress.sh`), or

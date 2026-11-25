@@ -2,8 +2,15 @@
 
 ## Completion campaign (networking correctness)
 
-Review checkpoint: `79bc539`. Base: `d703c30`. Status: lanes launched for the
-six defect groups; no slice accepted yet.
+Review checkpoint: `79bc539`. Base: `d703c30`. Status: UP-1, FR-1, SH-1,
+ST-1 and TR-1 are accepted on `main` and verified by `make test` (1087 passed)
+and clippy. Listener threads are now owned and joined by the daemon, and a
+focused standard (`owned-concurrency`) makes detached long-lived threads a
+must-fix finding. RS-1 has deterministic benchmarks and the stress workload but
+no checked-in reproducible daemon RSS measurement. NX-1: headless Nicotine+
+3.3.11 connected to a local soulfind and its file was discovered by this
+client; direct browse/download into that client remains unverified because
+soulfind reported its peer address as `0.0.0.0:0`.
 
 ### Sequence
 
@@ -42,7 +49,11 @@ six defect groups; no slice accepted yet.
 ### Needs environment
 
 - A local soulfind for server-backed verification (`SOULSEEK_E2E_REQUIRED=1`).
+  One `cli_e2e` login-timeout case fails on this host at the pre-campaign
+  commit as well; the rest pass.
 - An isolated Nicotine+ installation with `--headless` for interoperability.
+  Headless 3.3.11 was installed and connected locally; soulfind returned peer
+  address `0.0.0.0:0` for it, blocking direct peer connections in that setup.
 
 ### Decisions still in force
 
