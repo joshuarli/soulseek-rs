@@ -137,8 +137,8 @@ It writes machine-readable JSON with the exact git revision, load parameters,
 peak RSS, peak threads, sample count and measurement boundaries. Default output
 is `.work/tmp/daemon-rss/daemon-rss.json`; set `DAEMON_RSS_OUT` to keep a copy.
 
-At revision `45d53c2` on this macOS host, 8 rounds against debug binaries gave
-a peak of 9456 KiB RSS and 12 threads over 121 samples. Fixture files were 30
+At revision `7802ab2` on this macOS host, 8 rounds against debug binaries gave
+a peak of 9840 KiB RSS and 11 threads over 144 samples. Fixture files were 30
 bytes and both downloads completed; the result is a growth check under a small
 real load, not an idle baseline or a saturation ceiling.
 
