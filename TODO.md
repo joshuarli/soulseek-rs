@@ -10,15 +10,6 @@ Next: 23
 - **Fix with:** lifecycle-concurrency
 - **Effort:** L
 
-### SOUL-21 · P2 · Server backpressure disconnects the control session instead of deferring writes
-
-- **Area:** Server transport reliability
-- **Where:** soulseek-rs-lib/src/actor/server_actor.rs:372,592-601; soulseek-rs-lib/src/actor/peer_actor.rs:688-724
-- **Problem:** The server socket is nonblocking, but each outbound frame is written with one write_all plus flush and any error disconnects. On a congested or slow server connection, WouldBlock is expected backpressure rather than a fatal session error. The peer actor already has the correct partial-write/pending-write pattern, so the server actor is inconsistent with the transport contract. Structurally proven; no socket-pressure reproduction was run.
-- **Recommendation:** Give the server actor the same bounded pending-write state machine as peer actors: account for partial writes, treat WouldBlock as retryable backpressure, bound queued bytes with explicit disconnect semantics, and test partial writes and recovery.
-- **Fix with:** lifecycle-concurrency
-- **Effort:** M
-
 ### SOUL-9 · P3 · Verify one controlled session against the public Soulseek network
 
 - **Area:** Release verification

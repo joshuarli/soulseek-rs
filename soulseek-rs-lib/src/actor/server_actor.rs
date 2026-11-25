@@ -70,6 +70,8 @@ const LOGIN_VERDICT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+const MAX_PENDING_WRITE: usize = 1024 * 1024;
+
 /// The server actor's mailbox. Marked non-exhaustive: each protocol message
 /// the client learns adds a variant, and that must not break callers.
 #[derive(Debug, Clone)]
@@ -290,6 +292,8 @@ pub struct ServerActor {
     /// The single frame that opens a new server session.
     login_frame: Option<Message>,
     post_login_ready: bool,
+    /// Bytes the non-blocking socket would not take yet, in wire order.
+    pending_write: Vec<u8>,
     shared_folder_count: u32,
     shared_file_count: u32,
     session: SessionWatch,
@@ -345,6 +349,7 @@ impl ServerActor {
             queued_messages: Vec::new(),
             login_frame: None,
             post_login_ready: false,
+            pending_write: Vec::new(),
             shared_folder_count,
             shared_file_count,
             session: SessionWatch::default(),
@@ -603,10 +608,10 @@ impl ServerActor {
         let Some(_live) = cancel.live() else {
             return;
         };
-        let Some(stream) = self.stream.as_mut() else {
+        if self.stream.is_none() {
             error!("[server] Cannot send message: stream is None");
             return;
-        };
+        }
 
         trace!(
             "[server] ➡ {:?}",
@@ -620,14 +625,56 @@ impl ServerActor {
                 .map_err(|e| e.to_string())
         );
 
-        if let Err(e) = stream.write_all(&message.get_buffer()) {
+        self.pending_write.extend_from_slice(&message.get_buffer());
+        self.flush_pending_write();
+    }
+
+    /// Push as much of `pending_write` into the socket as it will take. The
+    /// socket is non-blocking, so `WouldBlock` is backpressure rather than a
+    /// failed session; whatever it refused stays queued for the next tick.
+    fn flush_pending_write(&mut self) {
+        if self.pending_write.is_empty() {
+            return;
+        }
+        let Some(stream) = self.stream.as_mut() else {
+            return;
+        };
+
+        let mut written = 0;
+        let outcome = loop {
+            match stream.write(&self.pending_write[written..]) {
+                Ok(0) => {
+                    break Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "server stopped accepting data",
+                    ));
+                }
+                Ok(n) => {
+                    written += n;
+                    if written == self.pending_write.len() {
+                        break Ok(());
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    break Ok(());
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        self.pending_write.drain(..written);
+
+        if let Err(e) = outcome {
             error!("[server] Error writing message: {}. Disconnecting.", e);
             self.disconnect_with_error();
             return;
         }
 
-        if let Err(e) = stream.flush() {
-            error!("[server] Error flushing stream: {}. Disconnecting.", e);
+        if self.pending_write.len() > MAX_PENDING_WRITE {
+            error!(
+                "[server] Outbound queue stuck above {} bytes. Disconnecting.",
+                MAX_PENDING_WRITE
+            );
             self.disconnect_with_error();
         }
     }
@@ -664,6 +711,7 @@ impl ServerActor {
         // next session must survive a failed reconnect.
         self.login_frame = None;
         self.post_login_ready = false;
+        self.pending_write.clear();
         self.reader = MessageReader::new();
         if let Ok(mut ctx) = self.context.write_safe() {
             ctx.logged_in = None;
@@ -744,7 +792,9 @@ impl Actor for ServerActor {
             }
             ConnectionState::Connected => {
                 if self.stream.is_some() {
+                    self.flush_pending_write();
                     self.process_read();
+                    self.flush_pending_write();
                 }
             }
             ConnectionState::Disconnected => {}

@@ -1,4 +1,6 @@
 use super::*;
+use std::io::Read;
+use std::net::TcpListener;
 
 fn code_of(message: &Message) -> u32 {
     u32::from_le_bytes(message.get_data()[0..4].try_into().unwrap())
@@ -438,4 +440,154 @@ fn an_operation_sent_before_the_verdict_waits_in_the_replay_buffer() {
     );
     actor.handle_login_status(true);
     assert!(actor.queued_messages.is_empty());
+}
+
+fn cap_buffer(stream: &TcpStream, option: libc::c_int) {
+    use std::os::unix::io::AsRawFd;
+
+    let size: libc::c_int = 64 * 1024;
+    // SAFETY: `size` outlives the call and its exact size travels with it.
+    let rc = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            option,
+            (&raw const size).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(rc, 0, "capping a socket buffer: {}", io::Error::last_os_error());
+}
+
+fn connected_server_actor() -> (ServerActor, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = TcpStream::connect(address).unwrap();
+    cap_buffer(&client, libc::SO_SNDBUF);
+    client.set_nonblocking(true).unwrap();
+    let (far_end, _) = listener.accept().unwrap();
+    far_end.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+
+    let mut actor = parked_actor(address.port());
+    actor.stream = Some(client);
+    actor.connection_state = ConnectionState::Connected;
+    actor.post_login_ready = true;
+    (actor, far_end)
+}
+
+fn drain_until(actor: &mut ServerActor, far_end: &mut TcpStream, expected: &[u8]) {
+    let mut received = Vec::new();
+    let mut scratch = vec![0u8; 64 * 1024];
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while received.len() < expected.len() && Instant::now() < deadline {
+        actor.tick();
+        match far_end.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(n) => received.extend_from_slice(&scratch[..n]),
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(e) => panic!("reading the far end: {e}"),
+        }
+    }
+    assert!(
+        received == expected,
+        "frames must arrive whole and in order ({} of {} bytes)",
+        received.len(),
+        expected.len()
+    );
+}
+
+#[test]
+fn a_blocked_server_socket_defers_frames_instead_of_dropping_the_session() {
+    let (mut actor, mut far_end) = connected_server_actor();
+    let first_query = "a".repeat(256 * 1024);
+    let second_query = "b".repeat(256 * 1024);
+    let first =
+        MessageFactory::build_file_search_message(1, &first_query).get_buffer();
+    let second =
+        MessageFactory::build_file_search_message(2, &second_query).get_buffer();
+
+    actor.handle_message(ServerMessage::SendMessage(
+        MessageFactory::build_file_search_message(1, &first_query),
+    ));
+    actor.handle_message(ServerMessage::SendMessage(
+        MessageFactory::build_file_search_message(2, &second_query),
+    ));
+
+    assert!(
+        matches!(actor.connection_state, ConnectionState::Connected),
+        "WouldBlock on the server socket is backpressure, not a dead session"
+    );
+    assert!(
+        !actor.pending_write.is_empty(),
+        "the refused remainder must wait in the pending-write queue"
+    );
+
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&first);
+    expected.extend_from_slice(&second);
+    drain_until(&mut actor, &mut far_end, &expected);
+    assert!(
+        actor.pending_write.is_empty(),
+        "a drained queue must be empty, not retain frames for a later send"
+    );
+}
+
+#[test]
+fn a_partial_frame_write_keeps_the_remainder_and_flushes_it_later() {
+    let (mut actor, mut far_end) = connected_server_actor();
+
+    let query = "x".repeat(256 * 1024);
+    let frame = MessageFactory::build_file_search_message(9, &query).get_buffer();
+    actor.handle_message(ServerMessage::SendMessage(
+        MessageFactory::build_file_search_message(9, &query),
+    ));
+
+    assert!(
+        matches!(actor.connection_state, ConnectionState::Connected),
+        "a socket that takes only part of a frame has not failed"
+    );
+    assert!(
+        !actor.pending_write.is_empty()
+            && actor.pending_write.len() < frame.len(),
+        "a partial write must leave the rest queued, not drop or resend it"
+    );
+    drain_until(&mut actor, &mut far_end, &frame);
+    assert!(actor.pending_write.is_empty());
+}
+
+#[test]
+fn a_server_peer_that_never_drains_hits_a_bounded_queue_and_disconnects() {
+    let (mut actor, far_end) = connected_server_actor();
+    cap_buffer(&far_end, libc::SO_RCVBUF);
+
+    let query = "x".repeat(256 * 1024);
+    actor.handle_message(ServerMessage::SendMessage(
+        MessageFactory::build_file_search_message(1, &query),
+    ));
+    assert!(
+        matches!(actor.connection_state, ConnectionState::Connected),
+        "one deferred frame is backpressure, not a reason to disconnect"
+    );
+
+    for token in 2..40u32 {
+        if actor.stream.is_none() {
+            break;
+        }
+        actor.handle_message(ServerMessage::SendMessage(
+            MessageFactory::build_file_search_message(token, &query),
+        ));
+    }
+
+    assert!(
+        matches!(actor.connection_state, ConnectionState::Disconnected),
+        "a peer that never reads must not grow the queue without bound"
+    );
+    assert!(
+        actor.pending_write.is_empty(),
+        "a closed session must not carry queued bytes into the next one"
+    );
 }
