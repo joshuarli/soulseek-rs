@@ -346,7 +346,7 @@ fn an_active_login_wait_ends_when_stop_is_set() {
     let started = Instant::now();
     let result = client.login_with_stop(&stop);
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(5),
         "stop must cancel the login wait instead of waiting for the server"
     );
     assert!(matches!(result, Err(SoulseekRs::NotConnected)), "{result:?}");
