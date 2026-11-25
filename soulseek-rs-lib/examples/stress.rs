@@ -861,7 +861,13 @@ fn read_baseline(path: &Path) -> Option<f64> {
         .ok()
 }
 
-fn write_baseline(path: &Path, score: &Score, cfg: &Config, m: &Metrics) {
+fn write_baseline(
+    path: &Path,
+    score: &Score,
+    cfg: &Config,
+    m: &Metrics,
+    peak_rss_kib: u64,
+) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -872,11 +878,12 @@ fn write_baseline(path: &Path, score: &Score, cfg: &Config, m: &Metrics) {
         .collect::<Vec<_>>()
         .join(",\n");
     let body = format!(
-        "{{\n  \"score\": {:.2},\n  \"parts\": {{\n{}\n  }},\n  \"load\": {{\n    \
-         \"peers\": {},\n    \"searches\": {},\n    \"downloads\": {},\n    \
+        "{{\n  \"revision\": \"{}\",\n  \"score\": {:.2},\n  \"parts\": {{\n{}\n  }},\n  \
+         \"load\": {{\n    \"peers\": {},\n    \"searches\": {},\n    \"downloads\": {},\n    \
          \"leechers\": {},\n    \"browses\": {},\n    \"file_bytes\": {}\n  }},\n  \
          \"observed\": {{\n    \"downloads_completed\": {},\n    \
-         \"uploads_completed\": {},\n    \"bytes\": {}\n  }}\n}}\n",
+         \"uploads_completed\": {},\n    \"bytes\": {},\n    \"peak_rss_kib\": {}\n  }}\n}}\n",
+        git_revision(),
         score.total,
         parts,
         cfg.peers,
@@ -888,8 +895,43 @@ fn write_baseline(path: &Path, score: &Score, cfg: &Config, m: &Metrics) {
         Metrics::get(&m.downloads_completed),
         Metrics::get(&m.uploads_completed),
         Metrics::get(&m.bytes_downloaded) + Metrics::get(&m.bytes_uploaded),
+        peak_rss_kib,
     );
     let _ = std::fs::write(path, body);
+}
+
+/// Peak resident set size in KiB. `getrusage` is the one counter available on
+/// both macOS and Linux without sampling /proc or spawning `ps`, and its unit
+/// differs between them: bytes on macOS, KiB on Linux.
+fn peak_rss_kib() -> u64 {
+    // SAFETY: `usage` is a zeroed, correctly aligned out-parameter for the
+    // process we own; getrusage writes only within it.
+    unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) != 0 {
+            return 0;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            usage.ru_maxrss as u64 / 1024
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            usage.ru_maxrss as u64
+        }
+    }
+}
+
+fn git_revision() -> String {
+    Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map_or_else(
+            || "unknown".into(),
+            |out| String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )
 }
 
 /// Live thread count for this process, so the harness can show whether load is
@@ -1048,15 +1090,19 @@ fn main() {
     let started = Instant::now();
     let run_deadline = started + cfg.timeout;
     let peak_threads = Arc::new(AtomicU64::new(0));
+    let peak_rss = Arc::new(AtomicU64::new(0));
 
-    // Sample thread count while the run is in flight.
+    // Sample thread count and RSS while the run is in flight. Both are process
+    // wide: the mock swarm shares this process with the client, so the number
+    // is an upper bound for the client alone, not a hidden client-only figure.
     {
-        let peak = peak_threads.clone();
+        let peak_threads = peak_threads.clone();
+        let peak_rss = peak_rss.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                let n = thread_count() as u64;
-                peak.fetch_max(n, Ordering::Relaxed);
+                peak_threads.fetch_max(thread_count() as u64, Ordering::Relaxed);
+                peak_rss.fetch_max(peak_rss_kib(), Ordering::Relaxed);
                 std::thread::sleep(Duration::from_millis(200));
             }
         });
@@ -1239,6 +1285,10 @@ fn main() {
         "  peak threads         {} (client + mock swarm, same process)",
         peak_threads.load(Ordering::Relaxed)
     );
+    println!(
+        "  peak RSS             {} KiB (client + mock swarm, same process)",
+        peak_rss.load(Ordering::Relaxed)
+    );
 
     // Where the stragglers got stuck is the whole diagnostic: a download parked
     // in Queued never got its transfer negotiated, while one in InProgress is
@@ -1284,13 +1334,25 @@ fn main() {
         let sign = if delta >= 0.0 { "+" } else { "" };
         println!("  baseline     {prev:.2}  ({sign}{delta:.2})");
         if cfg.save && score.total > prev {
-            write_baseline(&baseline_path, &score, &cfg, &metrics);
+            write_baseline(
+                &baseline_path,
+                &score,
+                &cfg,
+                &metrics,
+                peak_rss.load(Ordering::Relaxed),
+            );
             println!("  baseline updated to {:.2}", score.total);
         } else if cfg.save {
             println!("  baseline kept (run did not beat it)");
         }
     } else {
-        write_baseline(&baseline_path, &score, &cfg, &metrics);
+        write_baseline(
+            &baseline_path,
+            &score,
+            &cfg,
+            &metrics,
+            peak_rss.load(Ordering::Relaxed),
+        );
         println!("  baseline created at {:.2}", score.total);
     }
 

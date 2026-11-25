@@ -1,0 +1,21 @@
+{
+  "revision": "45d53c237130b9d6a23c527531f919b0fe0b68dc",
+  "load": {
+    "rounds": 8,
+    "operations_per_round": [
+      "search",
+      "browse",
+      "download",
+      "upload"
+    ],
+    "seeds": 1,
+    "share_bytes": 30,
+    "server_port": 59534
+  },
+  "observed": {
+    "peak_rss_kib": 9456,
+    "peak_threads": 12,
+    "sample_count": 121
+  },
+  "boundaries": "One measured daemon plus one seeder and soulfind on one host. RSS and thread count are sampled from the daemon process only, every 100 ms. This measures lifecycle and mixed-load growth, not an idle-daemon baseline or a saturation ceiling. Actor mailboxes and the client operation channel remain unbounded, so no global memory budget is claimed."
+}

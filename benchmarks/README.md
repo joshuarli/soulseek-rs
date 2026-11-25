@@ -121,8 +121,43 @@ entered those channels. These remain open work, not a proven resource budget.
 Daemon control-listener tests start and stop listeners through an owning guard;
 repeated runs stayed between 26 and 29 MiB maximum RSS with no thread growth.
 That is a lifecycle regression check, not an idle-daemon or saturation
-measurement. A checked-in, machine-readable daemon/server workload identifying
-exact commits, toolchain and fixture sizes is still needed.
+measurement.
+
+### Reproducible daemon RSS workload
+
+```sh
+SOULFIND_BIN=/path/to/soulfind scripts/daemon_rss.sh
+DAEMON_RSS_ROUNDS=16 scripts/daemon_rss.sh
+```
+
+The script starts a local soulfind, a seeder daemon, and the measured daemon,
+then drives one search, browse, download and upload per round in both
+directions, sampling the measured daemon's RSS and thread count every 100 ms.
+It writes machine-readable JSON with the exact git revision, load parameters,
+peak RSS, peak threads, sample count and measurement boundaries. Default output
+is `.work/tmp/daemon-rss/daemon-rss.json`; set `DAEMON_RSS_OUT` to keep a copy.
+
+At revision `45d53c2` on this macOS host, 8 rounds against debug binaries gave
+a peak of 9456 KiB RSS and 12 threads over 121 samples. Fixture files were 30
+bytes and both downloads completed; the result is a growth check under a small
+real load, not an idle baseline or a saturation ceiling.
+
+The mixed-load harness also reports peak RSS and the git revision that produced
+a stored baseline:
+
+```sh
+STRESS_PEERS=64 STRESS_SEARCHES=16 STRESS_DOWNLOADS=16 \
+STRESS_LEECHERS=8 STRESS_BROWSES=8 STRESS_FILE_KB=64 scripts/stress.sh
+```
+
+Its RSS and thread count cover the client and the mock swarm in one process, so
+they are an upper bound for the client alone and are not comparable with the
+daemon figures above. At revision `45d53c2` a reduced profile (64 peers, 16
+searches, 16 downloads, 8 leechers, 8 browses, 64 KiB files) reported peak RSS
+8384 KiB and 147 threads: searches, downloads and browses were 100%, uploads
+3/8 and only 26/64 mock seeders came online. That is a harness-side load
+limitation, not a client ceiling; the stored full-profile baseline has all four
+functional dimensions at 100%.
 
 ## Requirements
 

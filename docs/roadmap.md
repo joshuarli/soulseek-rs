@@ -13,9 +13,12 @@ Nicotine+ `core` browsed this daemon's `rustshare` and downloaded
 `share-rust\rust-track.mp3` to `Finished`. The earlier `0.0.0.0:0` peer address
 was a test-fixture fault: the Nicotine+ config file used Python-style quoted
 values (`login = 'nicouser'`), so the client logged in with quotes in its
-username and soulfind reported an address for a different name. RS-1 has
-deterministic benchmarks and the stress workload but still needs a checked-in
-reproducible daemon RSS measurement.
+username and soulfind reported an address for a different name. RS-1 is now
+accepted: `scripts/daemon_rss.sh` writes a revisioned, machine-readable RSS and
+thread envelope (`benchmarks/daemon-rss.json`: 9456 KiB peak, 12 threads over
+121 samples at `45d53c2`), and the mixed-load harness reports peak RSS and the
+revision behind its baseline. Unbounded actor mailboxes and the operation
+channel remain a documented boundary, not a claimed memory budget.
 
 ### Sequence
 

@@ -68,6 +68,12 @@ a separate campaign document.
   for a login answer on this host; the same failure reproduces on the
   pre-campaign commit, so it is not a campaign regression. The rest of the
   suite passes.
+- Independent-client interoperability: `scripts/interop_nicotine.py` drives
+  headless Nicotine+ against a running daemon and checks both browse and
+  download directions. Nicotine+ config values must be unquoted.
+- Resource evidence: `scripts/daemon_rss.sh` writes a revisioned RSS/thread
+  envelope under a mixed local load; see `benchmarks/README.md` for results
+  and measurement boundaries.
 - Tiers (warm): unit about 770 tests (`soulseek-rs`, `soulseek-rs-lib`; 1s each); local-socket tests (daemon transport bounds in
   `src/daemon/server`, `resume_e2e.rs`, `persist_e2e.rs`); server e2e 208 tests
   (`cli_e2e`, `daemon_protocol_e2e`, `tui_e2e`, lib `e2e`: client and peer
