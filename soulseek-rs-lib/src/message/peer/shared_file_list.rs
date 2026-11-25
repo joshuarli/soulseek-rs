@@ -2,6 +2,7 @@
 //! sent in reply to `GetShareFileList` (code 4). The payload is zlib-compressed
 //! and groups files by their virtual directory.
 
+use crate::error::SoulseekRs;
 use crate::message::{Message, MessageHandler};
 use crate::peer::PeerMessage;
 use crate::utils::zlib::{MAX_INFLATED_LISTING, deflate, inflate_limited};
@@ -68,9 +69,40 @@ pub fn build_shared_file_list(dirs: &[SharedDirectory]) -> Message {
 /// Returns an empty listing if the payload is malformed.
 #[must_use]
 pub fn parse_shared_file_list(message: &mut Message) -> Vec<SharedDirectory> {
+    try_parse_shared_file_list(message).unwrap_or_default()
+}
+
+/// Parse a listing, telling an oversized or corrupt payload apart from an
+/// empty one. The caller that decides whether to keep browsing needs that
+/// distinction; the plain parser stays a `Vec` for its existing callers.
+///
+/// # Errors
+///
+/// Returns a compression error when the compressed body is malformed or
+/// exceeds the listing ceiling.
+pub fn try_parse_shared_file_list(
+    message: &mut Message,
+) -> std::result::Result<Vec<SharedDirectory>, SoulseekRs> {
     // A whole share listing is the one payload that legitimately runs large.
-    decompress_body(message, MAX_INFLATED_LISTING)
-        .map_or_else(Vec::new, |mut body| read_directories(&mut body))
+    try_parse_shared_file_list_limited(message, MAX_INFLATED_LISTING)
+}
+
+/// Parse a listing with an explicit plaintext ceiling.
+///
+/// # Errors
+///
+/// Returns a compression error when the compressed body is malformed or
+/// exceeds `max_out`.
+pub fn try_parse_shared_file_list_limited(
+    message: &mut Message,
+    max_out: usize,
+) -> std::result::Result<Vec<SharedDirectory>, SoulseekRs> {
+    let Some(mut body) = decompress_body(message, max_out) else {
+        return Err(SoulseekRs::CompressionError(
+            "browse listing could not be inflated within its budget".to_string(),
+        ));
+    };
+    Ok(read_directories(&mut body))
 }
 
 /// Write a directory listing in the form both code 5 and code 37 carry.
@@ -144,9 +176,29 @@ pub fn decompress_body(
 ) -> Option<Message> {
     let pointer = message.get_pointer();
     let size = message.get_size();
-    inflate_limited(&message.get_slice(pointer, size), max_out)
+    let start = pointer.min(size);
+    inflate_limited(&message.get_slice(start, size), max_out)
         .ok()
         .map(Message::new_with_data)
+}
+
+#[test]
+fn a_listing_past_its_plaintext_budget_is_rejected() {
+    // One small deflate stream claims tens of MiB of directory data. It must
+    // be refused rather than materialised and only then thrown away.
+    let compressed = deflate(&vec![0u8; 40 * 1024 * 1024]);
+    assert!(
+        compressed.len() < 4 * 1024 * 1024,
+        "the hostile payload must be small on the wire"
+    );
+    let mut message = crate::message::framed(|m| {
+        m.write_raw_bytes(compressed);
+    });
+    assert!(
+        try_parse_shared_file_list_limited(&mut message, 8 * 1024 * 1024)
+            .is_err(),
+        "a listing over its budget must be refused"
+    );
 }
 
 #[test]

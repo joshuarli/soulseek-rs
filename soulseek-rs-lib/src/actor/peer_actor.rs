@@ -117,7 +117,22 @@ pub struct PeerActor {
     /// stream stays open until then so a reply already in flight, a browse
     /// listing say, still arrives; past it the actor closes and stops.
     retire_deadline: Option<Instant>,
+    /// Code 4 browses sent on this connection and still awaiting a code 5
+    /// reply. Code 5 has no token, so the pending count on this connection is
+    /// the only correlation available before inflating the compressed body.
+    browse_requests: u32,
+    /// Code 36 folder requests sent on this connection and still awaiting a
+    /// code 37 reply. The reply's token is inside its compressed body, so the
+    /// only correlation available before inflating is the pending count.
+    folder_requests: u32,
 }
+
+/// How many folder requests from one client may be in flight to a peer.
+const MAX_FOLDER_REQUESTS: u32 = 32;
+
+/// How many browse requests may be outstanding on one connection before a
+/// further request stops adding pending replies.
+const MAX_BROWSE_REQUESTS: u32 = 8;
 
 /// Cap on queued outbound bytes. A peer that stops reading must not be able to
 /// grow this without bound; dropping that connection is the right answer.
@@ -169,6 +184,8 @@ impl PeerActor {
             pending_write: Vec::new(),
             last_activity: Instant::now(),
             retire_deadline: None,
+            browse_requests: 0,
+            folder_requests: 0,
         }
     }
 
@@ -625,6 +642,9 @@ impl PeerActor {
         loop {
             match self.reader.extract_message() {
                 Ok(Some(mut message)) => {
+                    if !self.accepts_compressed_response(&message) {
+                        continue;
+                    }
                     extracted_count += 1;
                     trace!(
                         "[peer:{}] ← Message #{}: {:?}",
@@ -663,7 +683,73 @@ impl PeerActor {
         self.process_dispatcher_messages();
     }
 
+    /// Record the requests we send so only replies to them are inflated. Both
+    /// code 5 and code 37 carry their identifying fields inside the compressed
+    /// body, so the pending request itself is the correlation available before
+    /// spending an inflation budget.
+    fn note_outgoing_request(&mut self, message: &Message) {
+        let data = message.get_data();
+        // Outgoing messages are built, so their code leads the payload; the
+        // `get_message_code` helper is for frames read off a socket, which
+        // carry a four-byte length in front of it.
+        let Some(code_bytes) = data.get(0..4) else {
+            return;
+        };
+        match u32::from_le_bytes(code_bytes.try_into().unwrap_or_default()) {
+            4 => {
+                // Explicit full policy: past the cap a further browse is sent
+                // but cannot add another reply worth inflating.
+                if self.browse_requests < MAX_BROWSE_REQUESTS {
+                    self.browse_requests += 1;
+                }
+            }
+            // Past the cap a request is still sent, but cannot add another
+            // pending reply worth inflating.
+            36 if self.folder_requests < MAX_FOLDER_REQUESTS => {
+                self.folder_requests += 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a compressed reply corresponds to something we asked this peer
+    /// for. A retired connection is the exception: it was kept open precisely
+    /// so a reply already on the wire can still be delivered.
+    fn accepts_compressed_response(&mut self, message: &Message) -> bool {
+        let username = self.peer_username();
+        match message.get_message_code() {
+            5 => {
+                if self.browse_requests > 0 {
+                    self.browse_requests -= 1;
+                    return true;
+                }
+                if self.retire_deadline.is_some() {
+                    return true;
+                }
+                warn!(
+                    "[peer:{username}] ignoring a browse listing with no request"
+                );
+                false
+            }
+            37 => {
+                if self.folder_requests > 0 {
+                    self.folder_requests -= 1;
+                    return true;
+                }
+                if self.retire_deadline.is_some() {
+                    return true;
+                }
+                warn!(
+                    "[peer:{username}] ignoring a folder reply with no request"
+                );
+                false
+            }
+            _ => true,
+        }
+    }
+
     fn send_message(&mut self, message: Message) {
+        self.note_outgoing_request(&message);
         let username = self.peer_username();
         if self.stream.is_none() {
             error!("Cannot send message: stream is None");
@@ -768,6 +854,8 @@ impl PeerActor {
 
         self.stream.take();
         self.connection_state = ConnectionState::Disconnected;
+        self.browse_requests = 0;
+        self.folder_requests = 0;
 
         if self.disconnect_reported {
             return;
@@ -810,6 +898,8 @@ impl PeerActor {
 
         self.stream.take();
         self.connection_state = ConnectionState::Disconnected;
+        self.browse_requests = 0;
+        self.folder_requests = 0;
 
         if self.disconnect_reported {
             return;
@@ -1236,6 +1326,117 @@ mod framing_tests {
         assert_eq!(
             reader.extract_message().unwrap_err().kind(),
             io::ErrorKind::InvalidData
+        );
+    }
+
+    fn a_small_browse_listing() -> Vec<u8> {
+        let dir = crate::message::peer::SharedDirectory {
+            name: "music".to_string(),
+            files: Vec::new(),
+        };
+        crate::message::peer::build_shared_file_list(std::slice::from_ref(&dir))
+            .get_buffer()
+    }
+
+    #[test]
+    fn an_unsolicited_browse_listing_is_not_inflated_or_delivered() {
+        // Code 5 has no token, but it is only ever a reply to our code 4.
+        // A peer that sends one unasked must not get a decompression budget
+        // spent on it, nor a place in the client's browse results.
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(50));
+        let (mut actor, rx) = actor_on(ours);
+        theirs.write_all(&a_small_browse_listing()).unwrap();
+
+        actor.process_read();
+
+        let operations: Vec<_> = rx.try_iter().collect();
+        assert!(
+            !operations.iter().any(|op| matches!(
+                op,
+                ClientOperation::BrowseResult { .. }
+            )),
+            "an unrequested listing must not reach the client: {operations:?}"
+        );
+        assert!(actor.stream.is_some(), "dropping a reply is not a disconnect");
+    }
+
+    #[test]
+    fn a_browse_listing_after_our_request_is_still_delivered() {
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(50));
+        let (mut actor, rx) = actor_on(ours);
+        actor.handle_message(PeerMessage::SendMessage(
+            MessageFactory::build_get_share_file_list(),
+        ));
+        theirs.write_all(&a_small_browse_listing()).unwrap();
+
+        actor.process_read();
+
+        assert!(
+            rx.try_iter().any(|op| matches!(
+                op,
+                ClientOperation::BrowseResult { .. }
+            )),
+            "the reply to a real browse must still be delivered"
+        );
+    }
+
+    #[test]
+    fn a_folder_reply_to_our_request_is_still_delivered() {
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(50));
+        let (mut actor, rx) = actor_on(ours);
+        actor.handle_message(PeerMessage::SendMessage(
+            crate::message::peer::build_folder_contents_request(77, "music"),
+        ));
+        let dir = crate::message::peer::SharedDirectory {
+            name: "music".to_string(),
+            files: Vec::new(),
+        };
+        let reply = crate::message::peer::build_folder_contents(
+            77,
+            "music",
+            std::slice::from_ref(&dir),
+        )
+        .get_buffer();
+        theirs.write_all(&reply).unwrap();
+
+        actor.process_read();
+
+        assert!(
+            rx.try_iter().any(|op| matches!(
+                op,
+                ClientOperation::FolderContents { token: 77, .. }
+            )),
+            "the reply to a real folder request must still be delivered"
+        );
+    }
+
+    #[test]
+    fn an_unsolicited_folder_listing_is_not_inflated_or_delivered() {
+        // Code 37 carries its token inside the compressed body, so the only
+        // pre-inflation correlation is a code 36 still in flight.
+        let (ours, mut theirs) = socket_pair(Duration::from_millis(50));
+        let (mut actor, rx) = actor_on(ours);
+        let dir = crate::message::peer::SharedDirectory {
+            name: "music".to_string(),
+            files: Vec::new(),
+        };
+        let reply = crate::message::peer::build_folder_contents(
+            77,
+            "music",
+            std::slice::from_ref(&dir),
+        )
+        .get_buffer();
+        theirs.write_all(&reply).unwrap();
+
+        actor.process_read();
+
+        let operations: Vec<_> = rx.try_iter().collect();
+        assert!(
+            !operations.iter().any(|op| matches!(
+                op,
+                ClientOperation::FolderContents { .. }
+            )),
+            "an unrequested folder reply must not reach the client: {operations:?}"
         );
     }
 

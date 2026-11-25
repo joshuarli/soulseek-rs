@@ -58,19 +58,135 @@ impl BitReader {
 }
 
 use crate::error::{Result, SoulseekRs};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The most a peer payload may inflate to unless the caller says otherwise.
+/// The most a folder-style peer reply may inflate to.
 ///
-/// Nicotine+ passes this ceiling to its decompressor for a search or folder
-/// reply, and a larger one only for a browse listing.
-pub const MAX_INFLATED: usize = 128 * 1024 * 1024;
+/// One directory's worth of filenames is a few MiB even for a large sharer;
+/// the old 128 MiB ceiling let a few kilobytes from an unknown peer become a
+/// hundred-plus MiB Vec.
+pub const MAX_INFLATED: usize = 32 * 1024 * 1024;
 
-/// The ceiling for a whole browse listing, which a large sharer legitimately
-/// fills. The same number Nicotine+ allows.
-pub const MAX_INFLATED_LISTING: usize = 2 * 1024 * 1024 * 1024;
+/// The most one search reply may inflate to.
+///
+/// A search reply is a shortlist to choose a download from, not an archive of
+/// everything the peer found. The domain reply cap is 300 files, so eight MiB
+/// leaves ample room for long paths and audio attributes.
+pub const MAX_INFLATED_SEARCH: usize = 8 * 1024 * 1024;
+
+/// The most a whole browse listing may inflate to.
+///
+/// A large sharer legitimately fills this. Nicotine+ allows 2 GiB here, but a
+/// listing of a million long paths is still well under 128 MiB; beyond that is
+/// a bomb.
+pub const MAX_INFLATED_LISTING: usize = 128 * 1024 * 1024;
 
 /// What a payload that outgrows its ceiling is refused with.
 const TOO_BIG: &str = "compressed payload expands past its limit";
+
+/// No more than this many streams may inflate at once. Each one holds its
+/// output Vec until it is parsed, so concurrency is part of the memory bound.
+const MAX_CONCURRENT_INFLATIONS: usize = 8;
+
+/// Total output reserved by all in-flight inflations. Reservations are made
+/// in [`CHARGE_STEP`] chunks, so an in-flight stream may overshoot by at most
+/// one step per active decompressor.
+const MAX_INFLIGHT_BYTES: usize = 256 * 1024 * 1024;
+const CHARGE_STEP: usize = 64 * 1024;
+
+/// A process-wide budget for bytes produced by decompressors that are still
+/// running. Several peers can each send a reply just under their per-frame
+/// ceiling; the shared budget is what stops those replies from adding up.
+#[derive(Debug)]
+struct InflationBudget {
+    active: AtomicUsize,
+    bytes: AtomicUsize,
+    max_active: usize,
+    max_bytes: usize,
+}
+
+impl InflationBudget {
+    const fn new(max_active: usize, max_bytes: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            max_active,
+            max_bytes,
+        }
+    }
+
+    fn acquire(&self) -> Option<InflationGuard<'_>> {
+        let mut active = self.active.load(Ordering::Relaxed);
+        loop {
+            if active >= self.max_active {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(InflationGuard {
+                        budget: self,
+                        charged: 0,
+                    });
+                }
+                Err(seen) => active = seen,
+            }
+        }
+    }
+}
+
+static INFLATION_BUDGET: std::sync::LazyLock<InflationBudget> =
+    std::sync::LazyLock::new(|| {
+        InflationBudget::new(MAX_CONCURRENT_INFLATIONS, MAX_INFLIGHT_BYTES)
+    });
+
+/// One in-flight decompression's share of the process budget. Released on
+/// every return path by `Drop`, including a checksum or ceiling error.
+#[must_use]
+struct InflationGuard<'a> {
+    budget: &'a InflationBudget,
+    charged: usize,
+}
+
+impl InflationGuard<'_> {
+    /// Reserve the step-aligned bytes needed for `output_len`, refusing the
+    /// frame if the process is already close to its in-flight ceiling.
+    fn charge(&mut self, output_len: usize) -> std::result::Result<(), String> {
+        let target = output_len.div_ceil(CHARGE_STEP) * CHARGE_STEP;
+        if target <= self.charged {
+            return Ok(());
+        }
+        let delta = target - self.charged;
+        let mut bytes = self.budget.bytes.load(Ordering::Relaxed);
+        loop {
+            if bytes.saturating_add(delta) > self.budget.max_bytes {
+                return Err(TOO_BIG.to_string());
+            }
+            match self.budget.bytes.compare_exchange_weak(
+                bytes,
+                bytes + delta,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(seen) => bytes = seen,
+            }
+        }
+        self.charged = target;
+        Ok(())
+    }
+}
+
+impl Drop for InflationGuard<'_> {
+    fn drop(&mut self) {
+        self.budget.bytes.fetch_sub(self.charged, Ordering::Relaxed);
+        self.budget.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Inflate a zlib stream, checking its adler32 trailer.
 ///
@@ -85,7 +201,17 @@ pub fn inflate(input: &[u8]) -> Result<Vec<u8>> {
 /// The ceiling is the point: deflate reaches roughly 1000:1, so a few
 /// kilobytes from a peer we have never met can otherwise expand into
 /// gigabytes and take the process with it.
+///
+/// # Errors
+///
+/// Returns a compression error for a malformed stream, a bad adler32 trailer,
+/// a payload past `max_out`, or no free slot in the process-wide budget.
 pub fn inflate_limited(input: &[u8], max_out: usize) -> Result<Vec<u8>> {
+    let Some(mut budget) = INFLATION_BUDGET.acquire() else {
+        return Err(SoulseekRs::CompressionError(
+            "too many decompressions in flight".to_string(),
+        ));
+    };
     let mut r = BitReader::new(input.to_vec());
     let cmf = r.read_byte()?;
     let cm = cmf & 15; // Compression method
@@ -109,7 +235,7 @@ pub fn inflate_limited(input: &[u8], max_out: usize) -> Result<Vec<u8>> {
             "preset dictionary not supported".to_string(),
         ));
     }
-    let out = inflate_blocks(&mut r, max_out)
+    let out = inflate_blocks(&mut r, max_out, &mut budget)
         .map_err(SoulseekRs::CompressionError)?;
     // `read_bytes` assembles little-endian; the zlib trailer is big-endian.
     if r.read_bytes(4)?.swap_bytes() != adler32(&out) {
@@ -134,6 +260,7 @@ fn adler32(data: &[u8]) -> u32 {
 fn inflate_blocks(
     r: &mut BitReader,
     max_out: usize,
+    budget: &mut InflationGuard<'_>,
 ) -> std::result::Result<Vec<u8>, String> {
     let mut bfinal = 0;
     let mut out = Vec::new();
@@ -141,11 +268,12 @@ fn inflate_blocks(
         bfinal = r.read_bit()?;
         let btype = r.read_bits(2)?;
         match btype {
-            0 => inflate_block_no_compression(r, &mut out, max_out)?,
-            1 => inflate_block_fixed(r, &mut out, max_out)?,
-            2 => inflate_block_dynamic(r, &mut out, max_out)?,
+            0 => inflate_block_no_compression(r, &mut out, max_out, budget)?,
+            1 => inflate_block_fixed(r, &mut out, max_out, budget)?,
+            2 => inflate_block_dynamic(r, &mut out, max_out, budget)?,
             _ => return Err("invalid BTYPE".to_string()),
         }
+        budget.charge(out.len())?;
         if out.len() > max_out {
             return Err(TOO_BIG.to_string());
         }
@@ -157,6 +285,7 @@ fn inflate_block_no_compression(
     r: &mut BitReader,
     o: &mut Vec<u8>,
     max_out: usize,
+    budget: &mut InflationGuard<'_>,
 ) -> std::result::Result<(), String> {
     let len = r.read_bytes(2)?;
     let _nlen = r.read_bytes(2)?;
@@ -165,6 +294,7 @@ fn inflate_block_no_compression(
     }
     for _ in 0..len {
         o.push(r.read_byte()?);
+        budget.charge(o.len())?;
     }
     Ok(())
 }
@@ -251,6 +381,7 @@ fn inflate_block_data(
     distance_tree: &HuffmanTree,
     out: &mut Vec<u8>,
     max_out: usize,
+    budget: &mut InflationGuard<'_>,
 ) -> std::result::Result<(), String> {
     loop {
         // Checked per symbol, not per block: a single block can emit output
@@ -262,6 +393,7 @@ fn inflate_block_data(
         if sym <= 255 {
             // Literal byte
             out.push(sym as u8);
+            budget.charge(out.len())?;
         } else if sym == 256 {
             // End of block
             return Ok(());
@@ -286,6 +418,7 @@ fn inflate_block_data(
                 let idx = out.len() - dist as usize;
                 let byte = out[idx];
                 out.push(byte);
+                budget.charge(out.len())?;
             }
         }
     }
@@ -390,15 +523,24 @@ fn inflate_block_dynamic(
     r: &mut BitReader,
     o: &mut Vec<u8>,
     max_out: usize,
+    budget: &mut InflationGuard<'_>,
 ) -> std::result::Result<(), String> {
     let (literal_length_tree, distance_tree) = decode_trees(r)?;
-    inflate_block_data(r, &literal_length_tree, &distance_tree, o, max_out)
+    inflate_block_data(
+        r,
+        &literal_length_tree,
+        &distance_tree,
+        o,
+        max_out,
+        budget,
+    )
 }
 
 fn inflate_block_fixed(
     r: &mut BitReader,
     o: &mut Vec<u8>,
     max_out: usize,
+    budget: &mut InflationGuard<'_>,
 ) -> std::result::Result<(), String> {
     let mut bl = Vec::new();
     bl.extend(vec![8; 144]); // 0-143: 8 bits
@@ -413,7 +555,14 @@ fn inflate_block_fixed(
     let distance_alphabet: Vec<u32> = (0..30).collect();
     let distance_tree = bl_list_to_tree(&bl_dist, &distance_alphabet);
 
-    inflate_block_data(r, &literal_length_tree, &distance_tree, o, max_out)
+    inflate_block_data(
+        r,
+        &literal_length_tree,
+        &distance_tree,
+        o,
+        max_out,
+        budget,
+    )
 }
 
 struct BitWriter {
@@ -576,6 +725,37 @@ pub fn deflate(data: &[u8]) -> Vec<u8> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn the_default_plaintext_ceiling_is_a_domain_size() {
+        // A peer we have never met must not be able to make one frame allocate
+        // hundreds of MiB. A whole browse listing is the largest legitimate
+        // reply; everything else is far smaller than that.
+        let generic = std::hint::black_box(MAX_INFLATED);
+        assert!(
+            generic <= 32 * 1024 * 1024,
+            "the generic peer ceiling must be a domain size, got {generic}"
+        );
+        let listing = std::hint::black_box(MAX_INFLATED_LISTING);
+        assert!(
+            listing <= 128 * 1024 * 1024,
+            "a listing ceiling must be bounded, got {listing}"
+        );
+    }
+
+    #[test]
+    fn a_shared_budget_caps_concurrency_and_inflight_bytes() {
+        let budget = InflationBudget::new(1, 256 * 1024);
+        let mut guard = budget.acquire().expect("the first slot is free");
+        guard.charge(64 * 1024).expect("a small frame fits");
+        assert!(budget.acquire().is_none(), "the only slot is taken");
+        assert!(
+            guard.charge(512 * 1024).is_err(),
+            "in-flight bytes past the shared ceiling must be refused"
+        );
+        drop(guard);
+        assert!(budget.acquire().is_some(), "the slot is released on drop");
+    }
 
     #[test]
     fn a_payload_that_expands_past_its_ceiling_is_refused() {

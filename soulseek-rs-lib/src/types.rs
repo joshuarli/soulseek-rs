@@ -1,6 +1,10 @@
 use std::{collections::HashMap, sync::mpsc::Sender};
 
-use crate::{error::Result, message::Message, utils::zlib::inflate};
+use crate::{
+    error::Result,
+    message::Message,
+    utils::zlib::{MAX_INFLATED_SEARCH, inflate_limited},
+};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -92,6 +96,12 @@ pub const MAX_SEARCH_FILES: usize = 10_000;
 /// peer has plenty.
 pub const MAX_SEARCH_REPLY_FILES: usize = 300;
 
+/// Files one incoming reply may yield before its body is ignored.
+///
+/// A peer that claims more is either hostile or dumping its whole share;
+/// neither belongs in a shortlist, and both cost memory before any cap.
+pub const MAX_SEARCH_RESPONSE_FILES: usize = 1000;
+
 impl Search {
     /// Store one peer's response, unless this search already holds enough.
     ///
@@ -114,14 +124,18 @@ impl SearchResult {
         let pointer = message.get_pointer();
         let size = message.get_size();
         let data: Vec<u8> = message.get_slice(pointer, size);
-        let deflated = inflate(&data)?;
+        // Correlating a search reply needs the token, which lives inside the
+        // compressed body. The ceiling is therefore the only guard available
+        // before the allocation, and it must be the search domain's, not the
+        // generic or listing one.
+        let deflated = inflate_limited(&data, MAX_INFLATED_SEARCH)?;
         let mut message = Message::new_with_data(deflated);
 
         let username = message.read_string();
         let token = message.read_int32();
         let n_files = message.read_int32();
         let mut files: Vec<File> = Vec::new();
-        for _ in 0..n_files {
+        for _ in 0..n_files.min(MAX_SEARCH_RESPONSE_FILES as u32) {
             // Stop if a hostile n_files count outruns the payload, so a bogus
             // length can't spin us into a huge allocation loop.
             if message.get_pointer() >= message.get_size() {
@@ -593,6 +607,26 @@ mod tests {
             .expect("hostile count should parse, not error");
         assert_eq!(result.token, 7);
         assert!(result.files.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_search_reply_is_refused_before_files_are_kept() {
+        // A small deflate stream can claim to be tens of MiB of search hits.
+        // A search reply is a shortlist, so it must never inflate that far.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes()); // username ""
+        body.extend_from_slice(&7u32.to_le_bytes()); // token
+        body.extend_from_slice(&0u32.to_le_bytes()); // no files
+        body.extend_from_slice(&[0]); // slots
+        body.extend_from_slice(&0u32.to_le_bytes()); // speed
+        body.resize(40 * 1024 * 1024, 0); // hostile padding
+        let compressed = crate::utils::zlib::deflate(&body);
+        assert!(compressed.len() < 4 * 1024 * 1024, "the bomb must be small on wire");
+        let mut message = Message::new_with_data(compressed);
+        assert!(
+            SearchResult::new_from_message(&mut message).is_err(),
+            "a reply past the search ceiling must be refused, not collected"
+        );
     }
 
     // A truncated TransferRequest from an untrusted peer must parse to defaults

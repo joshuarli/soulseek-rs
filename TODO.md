@@ -10,15 +10,6 @@ Next: 23
 - **Fix with:** lifecycle-concurrency
 - **Effort:** L
 
-### SOUL-14 · P2 · Unsolicited compressed peer frames can allocate hundreds of MiB before correlation
-
-- **Area:** Peer input resource boundaries
-- **Where:** soulseek-rs-lib/src/utils/zlib.rs:62-70,88-120,134-153; soulseek-rs-lib/src/types.rs:113-118; soulseek-rs-lib/src/message/peer/shared_file_list.rs:40-47,69-73,139-149; soulseek-rs-lib/src/actor/peer_actor.rs:205-220
-- **Problem:** Compressed search, folder, and browse payloads are fully materialized before parsing or outstanding-request correlation. The per-frame ceilings are 128 MiB and 2 GiB, with no process-wide or per-peer decompression budget, and a small valid deflate stream can reach those sizes. Several hostile peers can multiply the allocation even when later domain caps discard the results. Proven by the input-to-allocation path; no bomb payload was executed.
-- **Recommendation:** Correlate compressed responses with outstanding requests before expensive inflation where the protocol permits it, reduce per-response plaintext budgets to domain sizes, add a process-wide decompression byte/concurrency budget, and move large listings toward streaming parse rather than one Vec. Measure the chosen ceilings with the benchmark workload.
-- **Fix with:** security
-- **Effort:** M
-
 ### SOUL-20 · P2 · Transfer direction is flattened into an unconditional download accept path
 
 - **Area:** Peer protocol correctness
