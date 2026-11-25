@@ -321,12 +321,9 @@ fn scan_root(
     *folder_count += folders_with_files.len();
 }
 
-/// Read audio attributes only after confirming the scan is still looking at
-/// the regular file it just indexed. The probe API takes a path and reopens it,
-/// so this is a preflight that rules out a FIFO already in place at probe time;
-/// it is not an atomic guard against a swap between the preflight and that
-/// reopen. An audio probe that blocks during scanning does not hold an upload
-/// descriptor and cannot wedge a transfer.
+/// Read audio attributes from the descriptor that was just checked, so a swap
+/// after indexing cannot redirect the probe to another path or block it on a
+/// FIFO. The descriptor stays owned by this call and is closed before return.
 fn probe_indexed(path: &Path, dev: u64, ino: u64) -> Vec<(u32, u32)> {
     const FLAGS: libc::c_int =
         libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
@@ -340,7 +337,7 @@ fn probe_indexed(path: &Path, dev: u64, ino: u64) -> Vec<(u32, u32)> {
         return Vec::new();
     }
     // SAFETY: `open` returned a fresh, owned file descriptor.
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     let Ok(meta) = file.metadata() else {
         return Vec::new();
     };
@@ -350,7 +347,10 @@ fn probe_indexed(path: &Path, dev: u64, ino: u64) -> Vec<(u32, u32)> {
     {
         return Vec::new();
     }
-    audio::probe(path)
+    if clear_nonblock(fd).is_err() {
+        return Vec::new();
+    }
+    audio::probe_open(&mut file, path)
 }
 
 /// Restore blocking reads on a regular file that was opened nonblocking only

@@ -217,15 +217,18 @@ pub fn run(
     // Every long-lived thread the daemon starts is owned here. On shutdown
     // the same flag that ends this loop ends them, and joining keeps a test
     // or a second daemon start from inheriting stale listeners.
-    let mut tasks: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    let mut tasks: Vec<(&'static str, std::thread::JoinHandle<()>)> = Vec::new();
 
     {
         let session = Arc::clone(&session.client);
         let hub = Arc::clone(&hub);
         let stop = Arc::clone(&stop);
-        tasks.push(std::thread::spawn(move || {
-            hub::run(session, hub, browses, downloads, stop);
-        }));
+        tasks.push((
+            "hub",
+            std::thread::spawn(move || {
+                hub::run(session, hub, browses, downloads, stop);
+            }),
+        ));
     }
 
     {
@@ -234,17 +237,23 @@ pub fn run(
         let stop = Arc::clone(&stop);
         let out = ctx.out.clone();
         let address = ctx.settings.server_address.to_string();
-        tasks.push(std::thread::spawn(move || {
-            reconnect_loop(&session, &daemon, &out, &address, &stop);
-        }));
+        tasks.push((
+            "reconnect",
+            std::thread::spawn(move || {
+                reconnect_loop(&session, &daemon, &out, &address, &stop);
+            }),
+        ));
     }
 
     for listener in listeners {
         let daemon = Arc::clone(&daemon);
         let stop = Arc::clone(&stop);
-        tasks.push(std::thread::spawn(move || {
-            listener.serve(daemon, &stop);
-        }));
+        tasks.push((
+            "control listener",
+            std::thread::spawn(move || {
+                listener.serve(daemon, &stop);
+            }),
+        ));
     }
 
     let (folders, files) = session.client.shared_counts();
@@ -269,8 +278,10 @@ pub fn run(
     ctx.out.status("stopping");
     // Joining keeps a half-written state file from racing the process exit
     // and leaves no listener or reconnect thread behind.
-    for task in tasks {
-        let _ = task.join();
+    for (name, task) in tasks {
+        if let Err(panic) = task.join() {
+            ctx.out.warn(&format!("the {name} thread panicked: {panic:?}"));
+        }
     }
     cleanup();
     Ok(())

@@ -80,10 +80,16 @@ impl Stream {
     /// accept loop needs that flag to stop; the connection threads do not, and
     /// a read that returns `WouldBlock` would look like a client hangup.
     fn make_blocking(&self) {
-        let _ = match self {
+        let result = match self {
             Self::Unix(stream) => stream.set_nonblocking(false),
             Self::Tcp(stream) => stream.set_nonblocking(false),
         };
+        if let Err(e) = result {
+            soulseek_rs::warn!(
+                "accepted control socket stayed nonblocking: {e}; reads may \
+                 look like a client hangup"
+            );
+        }
     }
 
     /// End the connection from another thread. This is what makes "a client
@@ -154,13 +160,15 @@ impl Listener {
     }
 
     fn set_nonblocking(&self, nonblocking: bool) {
-        match self {
-            Self::Unix(listener) => {
-                let _ = listener.set_nonblocking(nonblocking);
-            }
-            Self::Tcp(listener) => {
-                let _ = listener.set_nonblocking(nonblocking);
-            }
+        let result = match self {
+            Self::Unix(listener) => listener.set_nonblocking(nonblocking),
+            Self::Tcp(listener) => listener.set_nonblocking(nonblocking),
+        };
+        if let Err(e) = result {
+            soulseek_rs::warn!(
+                "control listener could not set nonblocking={nonblocking}: \
+                 {e}; shutdown may block in accept"
+            );
         }
     }
 

@@ -634,8 +634,10 @@ mod tests {
                 true,
                 std::sync::atomic::Ordering::Relaxed,
             );
-            if let Some(task) = self.task.take() {
-                let _ = task.join();
+            if let Some(task) = self.task.take()
+                && let Err(panic) = task.join()
+            {
+                soulseek_rs::warn!("test listener panicked: {panic:?}");
             }
         }
     }

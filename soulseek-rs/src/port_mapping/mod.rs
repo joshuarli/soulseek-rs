@@ -606,18 +606,59 @@ mod tests {
         reply
     }
 
+    /// The gateway thread and its recorded requests. Dropping the guard stops
+    /// and joins the thread instead of leaving it parked in `recv_from`.
+    struct GatewayGuard {
+        requests: mpsc::Receiver<Vec<u8>>,
+        stop: Arc<AtomicBool>,
+        task: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Drop for GatewayGuard {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(task) = self.task.take() {
+                let _ = task.join();
+            }
+        }
+    }
+
+    impl std::ops::Deref for GatewayGuard {
+        type Target = mpsc::Receiver<Vec<u8>>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.requests
+        }
+    }
+
     /// A gateway whose map replies are scripted in order. Unmap requests are
     /// always acknowledged and never consume a scripted reply.
-    fn scripted_gateway(
-        replies: Vec<Reply>,
-    ) -> (SocketAddr, mpsc::Receiver<Vec<u8>>) {
+    fn scripted_gateway(replies: Vec<Reply>) -> (SocketAddr, GatewayGuard) {
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket
+            .set_read_timeout(Some(StdDuration::from_millis(20)))
+            .unwrap();
         let addr = socket.local_addr().unwrap();
         let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = Arc::clone(&stop);
+        let task = thread::spawn(move || {
             let mut replies = replies.into_iter();
             let mut buf = [0u8; 64];
-            while let Ok((n, from)) = socket.recv_from(&mut buf) {
+            while !task_stop.load(Ordering::Relaxed) {
+                let (n, from) = match socket.recv_from(&mut buf) {
+                    Ok(received) => received,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(_) => break,
+                };
                 let request = buf[..n].to_vec();
                 let internal =
                     u16::from_be_bytes(request[4..6].try_into().unwrap());
@@ -642,7 +683,14 @@ mod tests {
                 let _ = socket.send_to(&reply, from);
             }
         });
-        (addr, rx)
+        (
+            addr,
+            GatewayGuard {
+                requests: rx,
+                stop,
+                task: Some(task),
+            },
+        )
     }
 
     fn collect_requests(requests: &mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {

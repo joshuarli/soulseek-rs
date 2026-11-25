@@ -20,22 +20,34 @@ const HEAD: usize = 8 * 1024;
 
 /// The attributes for `path`, or none when the format is not one we read or
 /// the file does not parse. Only the file's head is read.
+#[cfg(test)]
 #[must_use]
 pub fn probe(path: &Path) -> Vec<(u32, u32)> {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    probe_open(&mut file, path)
+}
+
+/// Probe an already-validated descriptor instead of reopening the path. The
+/// caller owns the handle-relative checks that make this descriptor the one
+/// they inspected; a path-only probe would reintroduce the swap race.
+#[must_use]
+pub fn probe_open(file: &mut std::fs::File, path: &Path) -> Vec<(u32, u32)> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
-        Some("mp3") => mp3(path),
-        Some("flac") => flac(path),
+        Some("mp3") => mp3(file),
+        Some("flac") => flac(file),
         _ => None,
     }
     .unwrap_or_default()
 }
 
-fn flac(path: &Path) -> Option<Vec<(u32, u32)>> {
+fn flac(file: &mut std::fs::File) -> Option<Vec<(u32, u32)>> {
     let mut head = [0u8; 42];
-    std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
+    file.read_exact(&mut head).ok()?;
     if &head[0..4] != b"fLaC" || head[4] & 0x7F != 0 {
         return None;
     }
@@ -127,8 +139,7 @@ fn frame(h: &[u8]) -> Option<Frame> {
     })
 }
 
-fn mp3(path: &Path) -> Option<Vec<(u32, u32)>> {
-    let mut file = std::fs::File::open(path).ok()?;
+fn mp3(file: &mut std::fs::File) -> Option<Vec<(u32, u32)>> {
     let total = file.metadata().ok()?.len();
     let mut head = [0u8; HEAD];
     let mut len = file.read(&mut head).ok()?;
@@ -228,6 +239,20 @@ pub(in crate::shares) mod tests {
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    #[test]
+    fn probe_open_reads_the_descriptor_not_a_replacement_path() {
+        let path = write("swapped.mp3", &cbr_mp3(100));
+        let mut file = std::fs::File::open(&path).expect("open the indexed file");
+        let replacement = path.with_extension("replacement.mp3");
+        std::fs::write(&replacement, b"not audio").expect("write a replacement");
+        std::fs::rename(&replacement, &path).expect("swap the path");
+        assert_eq!(
+            probe_open(&mut file, &path),
+            [(0, 128), (1, 2), (2, 0)],
+            "the probe must use the descriptor that was validated"
+        );
     }
 
     #[test]

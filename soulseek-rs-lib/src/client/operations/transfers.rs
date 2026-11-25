@@ -226,10 +226,15 @@ impl Client {
                             &filename,
                             QUEUE_FULL_REASON,
                         );
-                        let _ = registry.send_to_peer(
+                        if let Err(e) = registry.send_to_peer(
                             &requester_key,
                             PeerMessage::SendMessage(denial),
-                        );
+                        ) {
+                            error!(
+                                "[client] cannot deliver queue-full denial to \
+                                 {requester_key}: {e}"
+                            );
+                        }
                     }
                     return;
                 }
