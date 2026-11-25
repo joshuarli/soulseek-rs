@@ -63,11 +63,11 @@ a separate campaign document.
   `make lint` (`lint.yml`): cold 180.94s, warm 39s to 86s, clippy on all targets
   with `-D warnings`.
 - Server-backed verification with `SOULFIND_BIN` and
-  `SOULSEEK_E2E_REQUIRED=1`: one `cli_e2e` case,
-  `json_records_carry_every_extra_field_the_readme_names`, times out waiting
-  for a login answer on this host; the same failure reproduces on the
-  pre-campaign commit, so it is not a campaign regression. The rest of the
-  suite passes.
+  `SOULSEEK_E2E_REQUIRED=1`: the latest full run passed all but one `lib/e2e`
+  case whose soulfind instance failed to start under load; it passed on a
+  serial retry. `json_records_carry_every_extra_field_the_readme_names` has
+  also timed out waiting for a login on this host before, reproducing on the
+  pre-campaign commit, so neither is a campaign regression.
 - Independent-client interoperability: `scripts/interop_nicotine.py` drives
   headless Nicotine+ against a running daemon and checks both browse and
   download directions. Nicotine+ config values must be unquoted.

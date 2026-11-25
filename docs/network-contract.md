@@ -54,10 +54,12 @@ Daemon event and writer queues disconnect a client that falls behind instead of
 buffering without limit.
 
 The stress workload (`scripts/stress.sh`, `soulseek-rs-lib/examples/stress.rs`)
-reports its thread count for the **whole process**, which includes the mock
-peer swarm and local server fixture. That number is a trend line, not the
-application's own thread count. Separate the application from mock peers and
-OS `TIME_WAIT` entries when measuring sockets.
+reports its thread count and peak RSS for the **whole process**, which includes
+the mock peer swarm and local server fixture. Those numbers are a trend line,
+not the application's own resource use. `scripts/daemon_rss.sh` measures the
+daemon process alone under a mixed local load and records the revision and
+measurement boundaries. Separate the application from mock peers and OS
+`TIME_WAIT` entries when measuring sockets.
 
 ## Reachability limits
 

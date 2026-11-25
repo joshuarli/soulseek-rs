@@ -57,8 +57,10 @@ channel remain a documented boundary, not a claimed memory budget.
 ### Needs environment
 
 - A local soulfind for server-backed verification (`SOULSEEK_E2E_REQUIRED=1`).
-  One `cli_e2e` login-timeout case fails on this host at the pre-campaign
-  commit as well; the rest pass.
+  Server startup is sensitive to host load: one `lib/e2e` case failed when its
+  soulfind instance did not listen and passed on a serial retry, and a
+  `cli_e2e` login-timeout case has failed at the pre-campaign commit too.
+  Neither is a campaign regression.
 - An isolated Nicotine+ installation with `--headless` for interoperability.
   Headless 3.3.11 connected to a local soulfind. Its config values must be
   unquoted: `login = nicouser`, not `login = 'nicouser'`, or the quotes become
