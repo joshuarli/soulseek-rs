@@ -110,7 +110,7 @@ impl Client {
                 // send ConnectToPeer so the (firewalled) peer
                 // connects back to our listener quoting it.
                 let token = next_connect_token();
-                let server_sender = match client_context.write_safe() {
+                let (accepted, server_sender) = match client_context.write_safe() {
                     Ok(mut ctx) => {
                         // Reap the dead outbound actor so it
                         // stops pinning a pool worker and no
@@ -126,14 +126,20 @@ impl Client {
                         {
                             let _ = handle.stop();
                         }
-                        ctx.add_pending_connect(token, username.clone());
-                        ctx.server_sender.clone()
+                        (
+                            ctx.add_pending_connect(token, username.clone()),
+                            ctx.server_sender.clone(),
+                        )
                     }
                     Err(e) => {
                         error!("[client] PeerConnectFailed write: {}", e);
                         return;
                     }
                 };
+                if !accepted {
+                    debug!("[client] too many brokered connects; dropping one");
+                    return;
+                }
                 let Some(sender) = server_sender else {
                     return;
                 };

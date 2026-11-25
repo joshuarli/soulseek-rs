@@ -8,13 +8,83 @@ use super::{
     ActorSystem, Arc, AtomicBool, AtomicUsize, BROKER_CONNECT_TIMEOUT,
     BROWSE_PROTECT_WINDOW, ClientContext, DEFAULT_MAX_PEERS,
     DEFAULT_UPLOAD_SLOTS, DownloadStatus, DownloadStore, HashMap, HashSet,
-    Instant, PENDING_PEER_TTL, Recommendation, RoomEvent, RoomInfo, RoomTicker,
+    Instant, PENDING_PEER_TTL, PendingServe, Recommendation, RoomEvent, RoomInfo, RoomTicker,
     RoomUserStats, SharedDirectory, Shares, SimilarUser, UserInfo,
     UserInterests, UserMessage, UserPresence, UserStats, UserStatus, children,
     distributed, sorted_unique,
 };
 
 impl ClientContext {
+    /// Record an offer waiting for a peer address, unless the bounds refuse it.
+    pub(super) fn add_pending_serve(
+        &mut self,
+        username: &str,
+        token: u32,
+    ) -> bool {
+        let total: usize = self.pending_serves.values().map(Vec::len).sum();
+        let waiting = self
+            .pending_serves
+            .get(username)
+            .map_or(0, Vec::len);
+        if total >= super::MAX_PENDING_SERVES
+            || waiting >= super::MAX_PENDING_SERVES_PER_PEER
+        {
+            return false;
+        }
+        self.pending_serves
+            .entry(username.to_string())
+            .or_default()
+            .push(PendingServe {
+                token,
+                since: Instant::now(),
+            });
+        true
+    }
+
+    /// Take the still-live offers for `username` once its address is known.
+    pub(super) fn take_pending_serves(
+        &mut self,
+        username: &str,
+        now: Instant,
+    ) -> Vec<u32> {
+        let Some(serves) = self.pending_serves.remove(username) else {
+            return Vec::new();
+        };
+        serves
+            .into_iter()
+            .filter_map(|serve| {
+                (now.duration_since(serve.since) < super::PENDING_SERVE_TTL)
+                    .then_some(serve.token)
+            })
+            .collect()
+    }
+
+    /// Drop offers whose address request was never answered, freeing their
+    /// upload slots. A server that does not answer `GetPeerAddress` must not
+    /// hold an offer forever.
+    pub(super) fn sweep_expired_serves(&mut self, now: Instant) {
+        let mut expired = Vec::new();
+        self.pending_serves.retain(|_, serves| {
+            serves.retain(|serve| {
+                let live =
+                    now.duration_since(serve.since) < super::PENDING_SERVE_TTL;
+                if !live {
+                    expired.push(serve.token);
+                }
+                live
+            });
+            !serves.is_empty()
+        });
+        for token in expired {
+            self.uploads.remove(&token);
+        }
+    }
+
+    /// Release an offer we cannot track any more, so its slot is reusable.
+    pub(crate) fn drop_offer(&mut self, token: u32) {
+        self.uploads.remove(&token);
+    }
+
     /// A context for the client that logs in as `username`.
     #[must_use]
     pub fn for_user(username: &str) -> Self {
@@ -696,9 +766,13 @@ impl ClientContext {
 
     /// Remember that a server-brokered connection to `username` is pending under
     /// `token`; the peer will quote it back in a PierceFirewall.
-    pub fn add_pending_connect(&mut self, token: u32, username: String) {
+    pub fn add_pending_connect(&mut self, token: u32, username: String) -> bool {
+        if self.pending_connect_tokens.len() >= super::MAX_PENDING_CONNECTS {
+            return false;
+        }
         self.pending_connect_tokens
             .insert(token, (username, Instant::now() + BROKER_CONNECT_TIMEOUT));
+        true
     }
 
     /// Resolve and consume the peer expected for a brokered connection `token`.
@@ -713,19 +787,22 @@ impl ClientContext {
         &mut self,
         connect_token: u32,
         token: u32,
-        real_path: std::path::PathBuf,
-    ) -> Arc<AtomicBool> {
+        file: Arc<crate::shares::SharedFile>,
+    ) -> Option<Arc<AtomicBool>> {
+        if self.brokered_uploads.len() >= super::MAX_BROKERED_UPLOADS {
+            return None;
+        }
         let claimed = Arc::new(AtomicBool::new(false));
         self.brokered_uploads.insert(
             connect_token,
             super::BrokeredUpload {
                 token,
-                real_path,
+                file,
                 deadline: Instant::now() + BROKER_CONNECT_TIMEOUT,
                 claimed: claimed.clone(),
             },
         );
-        claimed
+        Some(claimed)
     }
 
     pub(crate) fn take_brokered_upload(

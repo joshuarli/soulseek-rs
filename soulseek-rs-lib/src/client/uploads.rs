@@ -10,6 +10,9 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+/// How many finished upload records stay available to `uploads()`.
+const MAX_UPLOAD_RECORDS: usize = 256;
+
 impl Client {
     /// Whether the server listed `username` as privileged. Privileged peers are
     /// served before everyone else.
@@ -124,6 +127,21 @@ impl Client {
         };
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
+        // Finished uploads are kept so `uploads()` can report history, but the
+        // history is a snapshot, not an archive: drop the oldest completed
+        // record rather than let a long-lived daemon grow this forever.
+        if ctx.active_uploads.len() >= MAX_UPLOAD_RECORDS {
+            let stale = ctx
+                .active_uploads
+                .iter()
+                .find(|(_, upload)| {
+                    !matches!(upload.status, UploadStatus::InProgress)
+                })
+                .map(|(token, _)| *token);
+            if let Some(token) = stale {
+                ctx.active_uploads.remove(&token);
+            }
+        }
         ctx.active_uploads.insert(
             token,
             ActiveUpload {
@@ -138,7 +156,7 @@ impl Client {
         );
         drop(ctx);
         let own = own_username.to_string();
-        let real_path = job.real_path;
+        let file = job.file;
         let downloader = job.downloader;
         let context = client_context.clone();
         thread::spawn(move || {
@@ -148,7 +166,7 @@ impl Client {
             // time; the first socket to arrive claims the transfer, and port 0
             // (the server not knowing where they listen) skips the dial.
             let Some((connect_token, claimed)) =
-                Self::broker_upload(&context, token, &real_path, &downloader)
+                Self::broker_upload(&context, token, &file, &downloader)
             else {
                 return;
             };
@@ -183,11 +201,11 @@ impl Client {
                 stream,
                 &own,
                 token,
-                &real_path,
+                &file,
                 &bytes_sent,
                 &cancel,
             );
-            Self::finish_upload(&context, token, &real_path, result);
+            Self::finish_upload(&context, token, &file.real_path, result);
         });
     }
 
@@ -197,19 +215,20 @@ impl Client {
     fn broker_upload(
         context: &Arc<RwLock<ClientContext>>,
         token: u32,
-        real_path: &Path,
+        file: &Arc<crate::shares::SharedFile>,
         downloader: &str,
     ) -> Option<(u32, Arc<AtomicBool>)> {
         let connect_token = next_connect_token();
         let (claimed, sender) = match context.write_safe() {
-            Ok(mut ctx) => (
-                ctx.add_brokered_upload(
-                    connect_token,
-                    token,
-                    real_path.to_path_buf(),
-                ),
-                ctx.server_sender.clone(),
-            ),
+            Ok(mut ctx) => {
+                let Some(claimed) =
+                    ctx.add_brokered_upload(connect_token, token, Arc::clone(file))
+                else {
+                    Self::fail_upload(context, token, "too many brokered uploads");
+                    return None;
+                };
+                (claimed, ctx.server_sender.clone())
+            }
             Err(_) => return None,
         };
         let Some(sender) = sender else {
@@ -250,14 +269,14 @@ impl Client {
             let result = upload_peer::serve_pierced(
                 stream,
                 upload.token,
-                &upload.real_path,
+                &upload.file,
                 &bytes_sent,
                 &cancel,
             );
             Self::finish_upload(
                 &context,
                 upload.token,
-                &upload.real_path,
+                &upload.file.real_path,
                 result,
             );
         });

@@ -166,9 +166,7 @@ impl Client {
                                         port,
                                     );
                                 }
-                                ctx.pending_serves
-                                    .remove(&username)
-                                    .unwrap_or_default()
+                                ctx.take_pending_serves(&username, Instant::now())
                             }
                             Err(_) => Vec::new(),
                         };
@@ -812,5 +810,9 @@ impl Client {
                 "peer never connected back",
             );
         }
+        if let Ok(mut ctx) = client_context.write_safe() {
+            ctx.sweep_expired_serves(Instant::now());
+        }
+        Self::pump_upload_queue(client_context);
     }
 }

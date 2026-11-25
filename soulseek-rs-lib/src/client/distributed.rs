@@ -89,6 +89,9 @@ pub struct Leaf {
     candidates: HashMap<String, Candidate>,
     next_link: u64,
     searches: (Instant, u32),
+    /// Server-relayed searches are a separate workload from the parent's:
+    /// one budget for both would let a busy parent starve ordinary searches.
+    server_searches: (Instant, u32),
     /// When we last told the server we moved, and whether a move since then
     /// is still waiting to be told.
     moved: Option<Instant>,
@@ -105,6 +108,7 @@ impl Leaf {
             candidates: HashMap::new(),
             next_link: 1,
             searches: (Instant::now(), 0),
+            server_searches: (Instant::now(), 0),
             moved: None,
             move_pending: false,
         }
@@ -223,6 +227,16 @@ impl Leaf {
         }
         self.searches.1 += 1;
         self.searches.1 <= SEARCH_BUDGET
+    }
+
+    /// Whether to answer one more search relayed by the server. Same budget,
+    /// counted separately so normal leaf participation survives a busy parent.
+    pub fn admit_server_search(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.server_searches.0) >= Duration::from_secs(1) {
+            self.server_searches = (now, 0);
+        }
+        self.server_searches.1 += 1;
+        self.server_searches.1 <= SEARCH_BUDGET
     }
 
     /// The link to `username` closed. True when that was the parent, which
@@ -488,6 +502,24 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_searches_have_their_own_budget() {
+        let mut leaf = leaf();
+        let now = Instant::now();
+        for _ in 0..SEARCH_BUDGET {
+            assert!(leaf.admit_search(now));
+            assert!(leaf.admit_server_search(now));
+        }
+        assert!(!leaf.admit_search(now), "parent budget is exhausted");
+        assert!(
+            !leaf.admit_server_search(now),
+            "server budget is exhausted too, independently"
+        );
+        let later = now + Duration::from_secs(2);
+        assert!(leaf.admit_search(later));
+        assert!(leaf.admit_server_search(later));
+    }
 
     fn leaf() -> Leaf {
         Leaf::new("me")

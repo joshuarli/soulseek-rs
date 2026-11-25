@@ -7,6 +7,11 @@ use crate::message::Message;
 // arbitrary-sized chunks, so we accumulate into a buffer and only emit a Message
 // once size + 4 bytes are available.
 
+/// A malformed length prefix must not make a peer grow our buffer without
+/// bound. Real protocol frames are far smaller; this leaves generous headroom
+/// for a large share list while keeping a stalled or hostile peer finite.
+pub const MAX_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
+
 pub struct MessageReader {
     buffer: VecDeque<u8>,
 }
@@ -49,9 +54,17 @@ impl MessageReader {
             ));
         }
 
-        // Add the read bytes to the internal buffer
-        self.buffer.extend(&temp_buffer[..bytes_read]);
+        self.append(&temp_buffer[..bytes_read])
+    }
 
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.buffer.len().saturating_add(bytes.len()) > MAX_BUFFERED_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("peer exceeded the {MAX_BUFFERED_BYTES}-byte frame buffer"),
+            ));
+        }
+        self.buffer.extend(bytes);
         Ok(())
     }
 
@@ -77,6 +90,15 @@ impl MessageReader {
             self.buffer[3],
         ]) as usize;
 
+        if message_size > MAX_BUFFERED_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "peer announced a {message_size}-byte frame, above the \
+                     {MAX_BUFFERED_BYTES}-byte limit"
+                ),
+            ));
+        }
         let total_size = message_size + 4;
 
         if bytes_read < total_size {
@@ -91,6 +113,7 @@ impl MessageReader {
 #[cfg(test)]
 mod tests {
     use crate::message::MessageReader;
+    use super::MAX_BUFFERED_BYTES;
 
     #[test]
     fn test_extract_message() {
@@ -126,6 +149,25 @@ mod tests {
 
         assert!(buffered_reader.buffer.is_empty());
         assert_eq!(vec![1, 2, 3], rest);
+    }
+
+    #[test]
+    fn a_huge_declared_frame_is_rejected_without_waiting_for_its_bytes() {
+        let size = (MAX_BUFFERED_BYTES as u32).saturating_add(1);
+        let mut reader = MessageReader::new_with_buffer(size.to_le_bytes().to_vec());
+        let error = reader.extract_message().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn the_buffered_byte_cap_cannot_be_exceeded_by_streaming() {
+        let mut reader = MessageReader::new();
+        let chunk = vec![0u8; 1024];
+        for _ in 0..MAX_BUFFERED_BYTES / 1024 {
+            reader.append(&chunk).unwrap();
+        }
+        let error = reader.append(&chunk).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     /// A hangup has to reach the caller as an error. Reported as success it

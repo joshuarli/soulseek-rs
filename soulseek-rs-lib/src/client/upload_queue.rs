@@ -10,13 +10,19 @@
 //! policy (per-user fairness, small-file-first) would be a different promise
 //! than the one the rules ask for.
 
-use super::{ClientContext, Duration, Instant, PeerRegistry, UploadJob};
+use super::{Arc, ClientContext, Duration, Instant, PeerRegistry, UploadJob};
+use crate::shares::SharedFile;
 use crate::types::{UploadInfo, UploadStatus};
-use std::path::PathBuf;
 
 /// Cap on remembered queued-upload states, so a caller that never drains
 /// them cannot grow the list without bound.
 const MAX_UPLOAD_EVENTS: usize = 256;
+
+/// A peer can ask for thousands of files in a burst; each entry holds a path
+/// and a username. Refuse beyond these bounds rather than let one peer grow
+/// the queue without limit.
+pub const MAX_QUEUED_UPLOADS: usize = 1024;
+pub const MAX_QUEUED_UPLOADS_PER_PEER: usize = 16;
 
 /// How long an offered slot waits for the peer's TransferResponse. A peer that
 /// never answers, having gone away or hung, would otherwise hold the slot for
@@ -39,7 +45,7 @@ pub struct QueuedUpload {
     /// The asking peer's username — also the registry key of its actor.
     pub downloader: String,
     pub virtual_path: String,
-    pub real_path: PathBuf,
+    pub file: Arc<SharedFile>,
     pub size: u64,
     /// Whether the server listed this user as privileged when they asked.
     pub privileged: bool,
@@ -99,22 +105,36 @@ impl ClientContext {
     /// Take `filename` from a peer's request and put them in the queue. The
     /// caller pumps afterwards; queueing and serving are separate so a request
     /// for a file we do not have never reaches the queue.
+    ///
+    /// Returns whether the request was accepted. A full queue is an explicit
+    /// refusal, not a reason to grow memory without bound.
     pub fn enqueue_upload(
         &mut self,
         downloader: &str,
         filename: &str,
-        real_path: std::path::PathBuf,
+        file: Arc<SharedFile>,
         size: u64,
-    ) {
+    ) -> bool {
+        let from_peer = self
+            .upload_queue
+            .iter()
+            .filter(|job| job.downloader == downloader)
+            .count();
+        if self.upload_queue.len() >= MAX_QUEUED_UPLOADS
+            || from_peer >= MAX_QUEUED_UPLOADS_PER_PEER
+        {
+            return false;
+        }
         self.upload_seq += 1;
         self.upload_queue.push(QueuedUpload {
             downloader: downloader.to_string(),
             virtual_path: filename.to_string(),
-            real_path,
+            file,
             size,
             privileged: self.privileged_users.contains(downloader),
             seq: self.upload_seq,
         });
+        true
     }
 
     /// Move as many queued uploads into free slots as will fit, and return the
@@ -144,7 +164,7 @@ impl ClientContext {
                 token,
                 UploadJob {
                     downloader: job.downloader,
-                    real_path: job.real_path,
+                    file: job.file,
                     virtual_path: job.virtual_path,
                     size: job.size,
                     offered: Some(Instant::now()),
@@ -307,7 +327,7 @@ mod tests {
         QueuedUpload {
             downloader: user.to_string(),
             virtual_path: format!("@@share\\{user}.mp3"),
-            real_path: PathBuf::from("/tmp/x.mp3"),
+            file: Arc::new(crate::shares::synthetic_file(&std::path::PathBuf::from("/tmp/x.mp3"))),
             size: 1,
             privileged,
             seq,
@@ -393,7 +413,10 @@ mod tests {
 /// go untested.
 #[cfg(test)]
 mod context_tests {
-    use super::OFFER_TIMEOUT;
+    use super::{
+        MAX_QUEUED_UPLOADS, MAX_QUEUED_UPLOADS_PER_PEER, OFFER_TIMEOUT,
+    };
+    use std::sync::Arc;
     use crate::client::{ClientContext, DEFAULT_UPLOAD_SLOTS};
     use crate::types::UploadStatus;
     use std::path::PathBuf;
@@ -411,7 +434,12 @@ mod context_tests {
     }
 
     fn ask(ctx: &mut ClientContext, user: &str, file: &str) {
-        ctx.enqueue_upload(user, file, PathBuf::from("/tmp/x"), 4096);
+        ctx.enqueue_upload(
+            user,
+            file,
+            Arc::new(crate::shares::synthetic_file(&PathBuf::from("/tmp/x"))),
+            4096,
+        );
     }
 
     /// Who the pump offered to, by the order it offered them.
@@ -424,6 +452,43 @@ mod context_tests {
             .into_iter()
             .map(|offer| offer.requester_key)
             .collect()
+    }
+
+    #[test]
+    fn a_queue_refuses_a_flood_from_one_peer_and_a_global_flood() {
+        let (mut ctx, _token) = context(1);
+        for index in 0..MAX_QUEUED_UPLOADS_PER_PEER {
+            assert!(ctx.enqueue_upload(
+                "flooder",
+                &format!("{index}.mp3"),
+                Arc::new(crate::shares::synthetic_file(&PathBuf::from("/tmp/x"))),
+                1
+            ));
+        }
+        assert!(
+            !ctx.enqueue_upload(
+                "flooder",
+                "too-many.mp3",
+                Arc::new(crate::shares::synthetic_file(&PathBuf::from("/tmp/x"))),
+                1
+            ),
+            "one peer must not own the whole queue"
+        );
+
+        // Other peers still get in; the global cap applies across all of them.
+        let mut accepted = MAX_QUEUED_UPLOADS_PER_PEER;
+        for index in 0..MAX_QUEUED_UPLOADS {
+            if ctx.enqueue_upload(
+                &format!("peer-{index}"),
+                "f.mp3",
+                Arc::new(crate::shares::synthetic_file(&PathBuf::from("/tmp/x"))),
+                1,
+            ) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, MAX_QUEUED_UPLOADS);
+        assert!(ctx.upload_queue.len() <= MAX_QUEUED_UPLOADS);
     }
 
     #[test]

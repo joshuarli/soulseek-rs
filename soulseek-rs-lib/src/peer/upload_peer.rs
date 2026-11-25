@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::message::server::MessageFactory;
 use crate::peer::ConnectionType;
+use crate::shares::{self, SharedFile};
 use crate::trace;
 
 /// Connect to the downloader's file listener and stream `path`'s bytes.
@@ -30,12 +31,12 @@ pub fn serve_file(
     port: u32,
     own_username: &str,
     token: u32,
-    path: &Path,
+    file: &SharedFile,
     bytes_sent: &AtomicU64,
     cancel: &AtomicBool,
 ) -> io::Result<u64> {
     let stream = dial(host, port)?;
-    serve_direct(stream, own_username, token, path, bytes_sent, cancel)
+    serve_direct(stream, own_username, token, file, bytes_sent, cancel)
 }
 
 /// Connect to `host:port` with the transfer deadlines applied.
@@ -80,11 +81,11 @@ pub fn serve_direct(
     mut stream: TcpStream,
     own_username: &str,
     token: u32,
-    path: &Path,
+    shared: &SharedFile,
     bytes_sent: &AtomicU64,
     cancel: &AtomicBool,
 ) -> io::Result<u64> {
-    let file = File::open(path)?;
+    let file = shares::open_contained(shared)?;
     // PeerInit(F) + the 4-byte token in a single write so they coalesce.
     let mut init = MessageFactory::build_peer_init_message(
         own_username,
@@ -95,7 +96,7 @@ pub fn serve_direct(
     init.extend_from_slice(&token.to_le_bytes());
     stream.write_all(&init)?;
     stream.flush()?;
-    stream_file(stream, file, path, bytes_sent, cancel)
+    stream_file(stream, file, &shared.real_path, bytes_sent, cancel)
 }
 
 /// Stream `path` over a connection the downloader opened to us after the
@@ -107,15 +108,15 @@ pub fn serve_direct(
 pub fn serve_pierced(
     stream: TcpStream,
     token: u32,
-    path: &Path,
+    shared: &SharedFile,
     bytes_sent: &AtomicU64,
     cancel: &AtomicBool,
 ) -> io::Result<u64> {
-    let file = File::open(path)?;
+    let file = shares::open_contained(shared)?;
     let mut stream = with_deadlines(stream)?;
     stream.write_all(&token.to_le_bytes())?;
     stream.flush()?;
-    stream_file(stream, file, path, bytes_sent, cancel)
+    stream_file(stream, file, &shared.real_path, bytes_sent, cancel)
 }
 
 fn stream_file(
@@ -221,12 +222,13 @@ mod tests {
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let sent_counter = bytes_sent.clone();
         let uploader = std::thread::spawn(move || {
+            let shared = crate::shares::indexed_file(&path);
             serve_file(
                 "127.0.0.1",
                 port,
                 "me",
                 token,
-                &path,
+                &shared,
                 &sent_counter,
                 &cancel,
             )
@@ -326,12 +328,13 @@ mod tests {
         let (result_tx, result_rx) = mpsc::channel();
 
         let uploader = std::thread::spawn(move || {
+            let shared = crate::shares::indexed_file(&path);
             let result = serve_file(
                 "127.0.0.1",
                 port,
                 "me",
                 783,
-                &path,
+                &shared,
                 &AtomicU64::new(0),
                 &AtomicBool::new(false),
             );

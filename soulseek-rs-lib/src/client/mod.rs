@@ -59,6 +59,13 @@ pub const DEFAULT_UPLOAD_SLOTS: usize = 10;
 /// How long to wait for a server-brokered (firewalled) peer to connect back
 /// before giving up and failing the download. Matches the direct-dial timeout.
 const BROKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// An upload offer whose peer address never arrived is failed after a minute.
+const PENDING_SERVE_TTL: Duration = Duration::from_mins(1);
+const MAX_PENDING_SERVES_PER_PEER: usize = 64;
+const MAX_PENDING_SERVES: usize = 256;
+/// Brokered connection requests are tracked until their 20s deadline.
+const MAX_PENDING_CONNECTS: usize = 256;
+const MAX_BROKERED_UPLOADS: usize = 256;
 
 const DEFAULT_MAX_PEERS: usize = 512;
 /// How long a message waits for a control connection to its peer.
@@ -107,7 +114,9 @@ fn next_search_token() -> u32 {
 /// A file we have agreed to serve to a peer, awaiting their TransferResponse.
 struct UploadJob {
     downloader: String,
-    real_path: std::path::PathBuf,
+    /// The indexed file, carried so the bytes are reopened inside its root at
+    /// transfer time rather than trusting the path recorded at scan time.
+    file: Arc<crate::shares::SharedFile>,
     virtual_path: String,
     size: u64,
     /// When the offer went out; `None` once the peer has answered it.
@@ -118,7 +127,7 @@ struct UploadJob {
 /// we also dial them. Whichever socket arrives first claims the transfer.
 pub(crate) struct BrokeredUpload {
     pub(crate) token: u32,
-    pub(crate) real_path: std::path::PathBuf,
+    pub(crate) file: Arc<crate::shares::SharedFile>,
     deadline: Instant,
     claimed: Arc<AtomicBool>,
 }
@@ -130,6 +139,14 @@ impl BrokeredUpload {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
+}
+
+/// An offered upload still waiting for the server to resolve the peer's
+/// address. After that deadline the offer is expired like any other.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingServe {
+    pub(crate) token: u32,
+    pub(crate) since: Instant,
 }
 
 /// Live bookkeeping for an upload being served (or recently finished).
@@ -520,8 +537,10 @@ pub struct ClientContext {
     /// Uploads we have offered, keyed by our transfer token.
     uploads: HashMap<u32, UploadJob>,
     active_uploads: HashMap<u32, ActiveUpload>,
-    /// Upload tokens waiting for the downloader's address to be resolved.
-    pending_serves: HashMap<String, Vec<u32>>,
+    /// Upload tokens waiting for the downloader's address to be resolved,
+    /// with the time each was queued so an unanswered address request cannot
+    /// hold an upload slot forever.
+    pending_serves: HashMap<String, Vec<PendingServe>>,
     /// Uploads whose downloader we could not dial, keyed by the correlation
     /// token we sent in `ConnectToPeer(F)`; the peer quotes it back in a
     /// `PierceFirewall` and we serve over that socket instead.

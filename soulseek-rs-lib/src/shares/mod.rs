@@ -8,8 +8,12 @@ mod audio;
 
 use crate::message::peer::{SharedDirectory, SharedFileEntry};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::ffi::CString;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::path::{Component, Path, PathBuf};
 
 /// One shared file: its peer-facing virtual path and where it lives on disk.
 ///
@@ -23,8 +27,17 @@ pub struct SharedFile {
     /// `virtual_path` lowercased once at scan time, so answering a search does
     /// not lowercase every shared path again.
     search_key: String,
-    /// The real filesystem path used to serve the bytes.
+    /// The real filesystem path, for display and logging only. Bytes are
+    /// always reopened through [`open_contained`], never through this string.
     pub real_path: PathBuf,
+    /// Canonical share root this file was indexed under.
+    pub root: PathBuf,
+    /// Path relative to `root`, used to walk from a root directory fd at open
+    /// time so neither `..` nor a late symlink can escape the share.
+    pub relative: PathBuf,
+    /// Identity of the indexed file; a replacement is refused until reindex.
+    pub dev: u64,
+    pub ino: u64,
     pub size: u64,
     /// `(code, value)` audio attributes read from the file's headers: bitrate,
     /// duration, VBR, sample rate, bit depth, as far as the format gives them.
@@ -34,7 +47,7 @@ pub struct SharedFile {
 /// A read-only snapshot of the shared files, cheap to clone behind an `Arc`.
 #[derive(Debug, Default)]
 pub struct Shares {
-    files: Vec<SharedFile>,
+    files: Vec<Arc<SharedFile>>,
     by_virtual: HashMap<String, usize>,
     folder_count: usize,
 }
@@ -84,13 +97,24 @@ impl Shares {
             } else {
                 format!("{base} ({uses})")
             };
-            scan_root(root, &name, &mut files, &mut folder_count);
+            // Keep the configured spelling for virtual names, but record a
+            // canonical root so the upload path cannot be redirected through
+            // a symlink in the root's ancestors.
+            let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            scan_root(
+                root,
+                &canonical,
+                &name,
+                &mut files,
+                &mut folder_count,
+            );
         }
 
         Self::from_files(files, folder_count)
     }
 
     fn from_files(files: Vec<SharedFile>, folder_count: usize) -> Self {
+        let files = files.into_iter().map(Arc::new).collect::<Vec<_>>();
         let by_virtual = files
             .iter()
             .enumerate()
@@ -106,7 +130,7 @@ impl Shares {
     /// Files whose virtual path contains *every* whitespace-separated term of
     /// `query` (case-insensitive). An empty query matches nothing.
     #[must_use]
-    pub fn search(&self, query: &str) -> Vec<&SharedFile> {
+    pub fn search(&self, query: &str) -> Vec<Arc<SharedFile>> {
         let terms: Vec<String> = query
             .to_lowercase()
             .split_whitespace()
@@ -118,18 +142,21 @@ impl Shares {
         self.files
             .iter()
             .filter(|f| terms.iter().all(|t| f.search_key.contains(t.as_str())))
+            .cloned()
             .collect()
     }
 
     /// Look up a shared file by its exact virtual path.
     #[must_use]
-    pub fn get(&self, virtual_path: &str) -> Option<&SharedFile> {
-        self.by_virtual.get(virtual_path).map(|&i| &self.files[i])
+    pub fn get(&self, virtual_path: &str) -> Option<Arc<SharedFile>> {
+        self.by_virtual
+            .get(virtual_path)
+            .map(|&i| Arc::clone(&self.files[i]))
     }
 
     /// All shared files, in scan order.
     #[must_use]
-    pub fn files(&self) -> &[SharedFile] {
+    pub fn files(&self) -> &[Arc<SharedFile>] {
         &self.files
     }
 
@@ -187,6 +214,7 @@ fn root_display_name(root: &Path) -> String {
 /// `root_name`) to `files` and counting folders that contain files.
 fn scan_root(
     root: &Path,
+    canonical_root: &Path,
     root_name: &str,
     files: &mut Vec<SharedFile>,
     folder_count: &mut usize,
@@ -219,11 +247,17 @@ fn scan_root(
                     continue;
                 }
                 let virtual_path = virtual_path_for(root_name, root, &path);
+                let relative =
+                    path.strip_prefix(root).unwrap_or(&path).to_path_buf();
                 files.push(SharedFile {
                     search_key: virtual_path.to_lowercase(),
                     virtual_path,
                     attributes: audio::probe(&path),
-                    real_path: path,
+                    real_path: path.clone(),
+                    root: canonical_root.to_path_buf(),
+                    relative,
+                    dev: meta.dev(),
+                    ino: meta.ino(),
                     size: meta.len(),
                 });
                 folders_with_files.insert(dir.clone());
@@ -231,6 +265,98 @@ fn scan_root(
         }
     }
     *folder_count += folders_with_files.len();
+}
+
+/// Open an indexed file for upload, confined to the share root it was scanned
+/// under.
+///
+/// The path recorded at scan time is a string; between then and the
+/// transfer a symlink or a whole directory can be swapped in. Walking from an
+/// already-open root fd with `O_NOFOLLOW` at each step closes that race: the
+/// descriptors we check are the descriptors we read from.
+///
+/// A file whose device/inode no longer matches the index is refused, so a
+/// replaced file cannot be served under an old virtual path until the next
+/// reindex. Regular files only: a swapped-in FIFO must not wedge a transfer.
+///
+/// # Errors
+/// Returns the first I/O error, or `InvalidData` when the entry would leave
+/// the root, is no longer a regular file, or is not the indexed file.
+pub fn open_contained(file: &SharedFile) -> io::Result<std::fs::File> {
+    const FLAGS: libc::c_int = libc::O_RDONLY
+        | libc::O_CLOEXEC
+        | libc::O_NOFOLLOW
+        | libc::O_DIRECTORY;
+
+    let mut directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FLAGS)
+        .open(&file.root)?;
+    let components: Vec<_> = file.relative.components().collect();
+    let Some((last, parents)) = components.split_last() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a shared file must have a name relative to its root",
+        ));
+    };
+    for component in parents {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a shared path may not traverse its root",
+            ));
+        };
+        let name = CString::new(name.as_encoded_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a shared path component contains a NUL byte",
+            )
+        })?;
+        // SAFETY: `directory` is owned by this call and stays open until the
+        // new descriptor replaces it; `name` is a live C string for the call.
+        let fd = unsafe {
+            libc::openat(directory.as_raw_fd(), name.as_ptr(), FLAGS)
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `openat` returned a fresh, owned file descriptor.
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    let Component::Normal(name) = last else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a shared path may not traverse its root",
+        ));
+    };
+    let leaf_flags = FLAGS & !libc::O_DIRECTORY;
+    // SAFETY: as above, both descriptors are valid for the duration of the
+    // call and `name` is a borrowed encoded path component.
+    let name = CString::new(name.as_encoded_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a shared path component contains a NUL byte",
+        )
+    })?;
+    let fd = unsafe {
+        libc::openat(directory.as_raw_fd(), name.as_ptr(), leaf_flags)
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `openat` returned a fresh, owned file descriptor.
+    let opened = unsafe { std::fs::File::from_raw_fd(fd) };
+    let meta = opened.metadata()?;
+    if !meta.file_type().is_file()
+        || meta.dev() != file.dev
+        || meta.ino() != file.ino
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the shared file changed since it was indexed",
+        ));
+    }
+    Ok(opened)
 }
 
 /// Build the peer-facing virtual path for `path` under `root`: the root's own
@@ -245,8 +371,45 @@ fn virtual_path_for(root_name: &str, root: &Path, path: &Path) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn indexed_file(path: &Path) -> SharedFile {
+    let root = path.canonicalize().expect("a real fixture path");
+    let name = root.file_name().expect("a file name").to_os_string();
+    let parent = root.parent().expect("a parent").to_path_buf();
+    let meta = std::fs::metadata(&root).expect("fixture metadata");
+    SharedFile {
+        virtual_path: name.to_string_lossy().into_owned(),
+        search_key: name.to_string_lossy().to_lowercase(),
+        real_path: root,
+        root: parent,
+        relative: PathBuf::from(name),
+        dev: meta.dev(),
+        ino: meta.ino(),
+        size: meta.len(),
+        attributes: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn synthetic_file(path: &Path) -> SharedFile {
+    let root = path.parent().unwrap_or_else(|| Path::new("/"));
+    let name = path.file_name().unwrap_or_default().to_os_string();
+    SharedFile {
+        virtual_path: name.to_string_lossy().into_owned(),
+        search_key: name.to_string_lossy().to_lowercase(),
+        real_path: path.to_path_buf(),
+        root: root.to_path_buf(),
+        relative: PathBuf::from(name),
+        dev: 0,
+        ino: 0,
+        size: 0,
+        attributes: Vec::new(),
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::Shares;
+    use super::{Shares, open_contained};
+    use std::io::Read;
 
     fn temp_tree() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -414,5 +577,93 @@ mod tests {
         assert_eq!(shares.file_count(), 0);
         assert_eq!(shares.folder_count(), 0);
         assert!(shares.search("anything").is_empty());
+    }
+
+    #[test]
+    fn a_scanned_file_is_opened_from_its_root_not_from_its_display_path() {
+        let root = temp_tree();
+        let shares = Shares::scan(&root).unwrap();
+        let file = shares
+            .get(&format!(
+                "{}\\album\\song one.flac",
+                root.file_name().unwrap().to_string_lossy()
+            ))
+            .unwrap();
+        let opened = open_contained(&file).expect("the indexed file opens");
+        let mut bytes = Vec::new();
+        (&opened).read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"bbbbbb");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_symlink_swapped_in_after_indexing_cannot_serve_outside_the_root() {
+        let root = temp_tree();
+        let outside = std::env::temp_dir().join(format!(
+            "soulseek-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&outside, b"secret").unwrap();
+        let file = shares_file(&root, "top.mp3");
+
+        std::fs::remove_file(root.join("top.mp3")).unwrap();
+        symlink(&outside, &root.join("top.mp3"));
+        let error = open_contained(&file).unwrap_err();
+        assert!(
+            error.kind() == std::io::ErrorKind::InvalidData
+                || error.raw_os_error() == Some(libc::ELOOP),
+            "a symlink must not be followed: {error}"
+        );
+        let _ = std::fs::remove_file(outside);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_replaced_file_is_refused_until_the_next_scan() {
+        let root = temp_tree();
+        let file = shares_file(&root, "top.mp3");
+        // Replace the directory entry, not just its bytes: an in-place write
+        // keeps the inode and is still the indexed file.
+        let replacement = root.join("replacement.tmp");
+        std::fs::write(&replacement, b"different").unwrap();
+        std::fs::rename(&replacement, root.join("top.mp3")).unwrap();
+        assert_eq!(
+            open_contained(&file).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let shares = Shares::scan(&root).unwrap();
+        assert!(open_contained(shares.files().first().unwrap()).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_parent_directory_cannot_be_traversed() {
+        let root = temp_tree();
+        let mut file = shares_file(&root, "top.mp3");
+        file.relative = std::path::PathBuf::from("../outside.mp3");
+        assert_eq!(
+            open_contained(&file).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn shares_file(root: &std::path::Path, name: &str) -> super::SharedFile {
+        let shares = Shares::scan(root).unwrap();
+        let file = shares
+            .files()
+            .iter()
+            .find(|f| f.virtual_path.ends_with(name))
+            .unwrap();
+        (**file).clone()
+    }
+
+    fn symlink(target: &std::path::Path, link: &std::path::Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
     }
 }

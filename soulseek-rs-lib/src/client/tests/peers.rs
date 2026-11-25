@@ -48,7 +48,9 @@ fn a_clean_disconnect_keeps_queued_uploads_an_error_drops_them() {
     client.context.write().unwrap().enqueue_upload(
         "amy",
         "@@share\\f.mp3",
-        std::path::PathBuf::from("/tmp/f.mp3"),
+        std::sync::Arc::new(crate::shares::synthetic_file(std::path::Path::new(
+            "/tmp/f.mp3",
+        ))),
         4096,
     );
 
@@ -117,6 +119,28 @@ fn a_pending_connect_expires_after_the_broker_timeout() {
 }
 
 #[test]
+fn pending_serves_expire_and_accept_no_flood() {
+    use std::time::{Duration, Instant};
+
+    let mut context = ClientContext::new();
+    assert!(context.add_pending_serve("waiting", 1));
+    let now = Instant::now() + Duration::from_secs(120);
+    context.sweep_expired_serves(now);
+    assert!(
+        context.pending_serves.is_empty(),
+        "an unanswered address request must not hold an upload slot forever"
+    );
+
+    for token in 0..super::super::MAX_PENDING_SERVES_PER_PEER as u32 {
+        assert!(context.add_pending_serve("flooder", token));
+    }
+    assert!(
+        !context.add_pending_serve("flooder", 9999),
+        "one peer must not fill the pending-serve map"
+    );
+}
+
+#[test]
 fn protected_peers_covers_downloads_uploads_and_pending_serves() {
     let mut context = ClientContext::new();
     context.add_download(download(
@@ -133,9 +157,7 @@ fn protected_peers_covers_downloads_uploads_and_pending_serves() {
         DownloadStatus::Completed,
         mpsc::channel().0,
     ));
-    context
-        .pending_serves
-        .insert("waiting".to_string(), vec![9]);
+    assert!(context.add_pending_serve("waiting", 9));
     context.mark_browse_pending("browsed");
 
     let protected = context.protected_peers();

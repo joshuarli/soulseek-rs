@@ -44,6 +44,11 @@ fn warn_if_open_file_limit_is_low() {
 
 impl Client {
     pub fn connect(&mut self) -> Result<()> {
+        // Re-entering would replace the actor handle and leave the first
+        // server actor, socket and login verdict thread running unowned.
+        if self.server_handle.is_some() {
+            return Err(SoulseekRs::AlreadyConnected);
+        }
         warn_if_open_file_limit_is_low();
 
         let (sender, message_reader): (

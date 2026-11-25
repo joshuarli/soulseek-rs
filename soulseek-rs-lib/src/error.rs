@@ -16,6 +16,8 @@ pub enum SoulseekRs {
     InvalidMessage(String),
     /// Server not connected
     NotConnected,
+    /// A second `connect()` would orphan the first server actor and its socket.
+    AlreadyConnected,
     /// Compression/decompression error
     CompressionError(String),
     /// A lock was poisoned by a panic in another thread
@@ -38,6 +40,9 @@ impl fmt::Display for SoulseekRs {
                 write!(f, "Invalid message: {msg}")
             }
             Self::NotConnected => write!(f, "Not connected to server"),
+            Self::AlreadyConnected => {
+                write!(f, "Already connected; disconnect before reconnecting")
+            }
             Self::CompressionError(msg) => {
                 write!(f, "Compression error: {msg}")
             }

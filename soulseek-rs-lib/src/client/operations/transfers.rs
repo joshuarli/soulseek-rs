@@ -162,11 +162,13 @@ impl Client {
                         port,
                     );
                 } else {
-                    if let Ok(mut ctx) = client_context.write_safe() {
-                        ctx.pending_serves
-                            .entry(downloader.clone())
-                            .or_default()
-                            .push(token);
+                    if let Ok(mut ctx) = client_context.write_safe()
+                        && !ctx.add_pending_serve(&downloader, token)
+                    {
+                        debug!(
+                            "[client] pending serves full; expiring offer {token}"
+                        );
+                        ctx.drop_offer(token);
                     }
                     if let Ok(ctx) = client_context.read_safe()
                         && let Some(sender) = ctx.server_sender.clone()
@@ -191,13 +193,17 @@ impl Client {
                             return;
                         };
                         let size = file.size;
-                        let real_path = file.real_path.clone();
-                        ctx.enqueue_upload(
+                        if !ctx.enqueue_upload(
                             &requester_key,
                             &filename,
-                            real_path,
+                            file,
                             size,
-                        );
+                        ) {
+                            debug!(
+                                "[client] upload queue full; refusing {filename} \
+                                 from {requester_key}"
+                            );
+                        }
                     }
                     Err(e) => {
                         error!("[client] QueueUpload write: {}", e);

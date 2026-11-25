@@ -16,6 +16,21 @@ impl Semaphore {
         }
     }
 
+    /// Take a permit if one is free, or return `None` immediately. Callers
+    /// accepting untrusted connections use this so a full queue refuses the
+    /// newcomer instead of blocking the accept loop behind stalled handshakes.
+    #[must_use]
+    pub fn try_acquire(self: &Arc<Self>) -> Option<Permit> {
+        let mut permits =
+            self.permits.lock().unwrap_or_else(PoisonError::into_inner);
+        if *permits == 0 {
+            return None;
+        }
+        *permits -= 1;
+        Some(Permit(Arc::clone(self)))
+    }
+
+    #[cfg(test)]
     #[must_use]
     pub fn acquire(self: &Arc<Self>) -> Permit {
         let mut permits =
@@ -47,6 +62,15 @@ impl Drop for Permit {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn try_acquire_refuses_instead_of_waiting() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.acquire();
+        assert!(semaphore.try_acquire().is_none());
+        drop(permit);
+        assert!(semaphore.try_acquire().is_some());
+    }
 
     #[test]
     fn permits_bound_concurrent_holders() {

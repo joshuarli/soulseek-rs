@@ -41,11 +41,15 @@ impl Client {
                         // it arrived; this is the server's.
                         ctx.children.broadcast_search(&username, token, &query);
                     }
-                    // Answering costs a scan of everything we
-                    // share, so the budget applies to searches
-                    // from the tree. The server's own are few.
-                    let answer =
-                        !from_parent || ctx.leaf.admit_search(Instant::now());
+                    // Answering costs a scan of everything we share, so both
+                    // sources are budgeted. Separate counters keep a busy
+                    // parent from starving ordinary leaf participation.
+                    let now = Instant::now();
+                    let answer = if from_parent {
+                        ctx.leaf.admit_search(now)
+                    } else {
+                        ctx.leaf.admit_server_search(now)
+                    };
                     // A child whose socket has gone is dropped by
                     // that write, which frees a slot the server
                     // should hear about.

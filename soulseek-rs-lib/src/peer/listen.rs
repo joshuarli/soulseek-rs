@@ -463,7 +463,13 @@ impl Listen {
                 continue;
             };
 
-            let permit = handshakes.acquire();
+            let Some(permit) = handshakes.try_acquire() else {
+                // Full handshake queue: drop this connection rather than block
+                // the accept loop behind peers that may never finish theirs.
+                debug!("[listener] handshake queue full; refusing a connection");
+                drop(stream);
+                continue;
+            };
             let context = context.clone();
             // One thread per connection: the peer-init handshake blocks, and a
             // peer that is slow to send one must not stop us accepting anybody
