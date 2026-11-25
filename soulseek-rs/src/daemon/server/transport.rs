@@ -16,7 +16,7 @@ use deser_value::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
@@ -76,6 +76,16 @@ impl Stream {
         };
     }
 
+    /// Accepted sockets inherit the listener's nonblocking flag on Unix. The
+    /// accept loop needs that flag to stop; the connection threads do not, and
+    /// a read that returns `WouldBlock` would look like a client hangup.
+    fn make_blocking(&self) {
+        let _ = match self {
+            Self::Unix(stream) => stream.set_nonblocking(false),
+            Self::Tcp(stream) => stream.set_nonblocking(false),
+        };
+    }
+
     /// End the connection from another thread. This is what makes "a client
     /// that stops reading is disconnected" true rather than aspirational: the
     /// hub can only reach a stalled client by closing its socket.
@@ -121,17 +131,35 @@ impl Write for Stream {
 }
 
 impl Listener {
-    /// Accept forever, handing each connection to its own thread.
-    pub fn serve(self, daemon: Arc<Daemon>) {
-        loop {
+    /// Accept until the daemon is stopped, handing each connection to its own
+    /// thread. The loop owns no thread of its own: its caller holds the
+    /// handle and joins it on shutdown.
+    pub fn serve(self, daemon: Arc<Daemon>, stop: &AtomicBool) {
+        self.set_nonblocking(true);
+        while !stop.load(Ordering::Relaxed) {
             match self.accept() {
-                Ok(stream) => spawn_connection(stream, Arc::clone(&daemon)),
-                Err(e) => {
-                    soulseek_rs::warn!("control accept failed: {e}");
-                    // Out of file descriptors does not clear by the next
-                    // instruction; retrying flat out spins a core.
+                Ok(stream) => {
+                    stream.make_blocking();
+                    spawn_connection(stream, Arc::clone(&daemon));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(ACCEPT_BACKOFF);
                 }
+                Err(e) => {
+                    soulseek_rs::warn!("control accept failed: {e}");
+                    std::thread::sleep(ACCEPT_BACKOFF);
+                }
+            }
+        }
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) {
+        match self {
+            Self::Unix(listener) => {
+                let _ = listener.set_nonblocking(nonblocking);
+            }
+            Self::Tcp(listener) => {
+                let _ = listener.set_nonblocking(nonblocking);
             }
         }
     }

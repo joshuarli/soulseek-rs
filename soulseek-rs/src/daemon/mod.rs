@@ -214,14 +214,19 @@ pub fn run(
         searches: Mutex::new(std::collections::HashMap::new()),
     });
 
-    let drainer = {
+    // Every long-lived thread the daemon starts is owned here. On shutdown
+    // the same flag that ends this loop ends them, and joining keeps a test
+    // or a second daemon start from inheriting stale listeners.
+    let mut tasks: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
+    {
         let session = Arc::clone(&session.client);
         let hub = Arc::clone(&hub);
         let stop = Arc::clone(&stop);
-        std::thread::spawn(move || {
+        tasks.push(std::thread::spawn(move || {
             hub::run(session, hub, browses, downloads, stop);
-        })
-    };
+        }));
+    }
 
     {
         let session = Arc::clone(&session.client);
@@ -229,14 +234,17 @@ pub fn run(
         let stop = Arc::clone(&stop);
         let out = ctx.out.clone();
         let address = ctx.settings.server_address.to_string();
-        std::thread::spawn(move || {
+        tasks.push(std::thread::spawn(move || {
             reconnect_loop(&session, &daemon, &out, &address, &stop);
-        });
+        }));
     }
 
     for listener in listeners {
         let daemon = Arc::clone(&daemon);
-        std::thread::spawn(move || listener.serve(daemon));
+        let stop = Arc::clone(&stop);
+        tasks.push(std::thread::spawn(move || {
+            listener.serve(daemon, &stop);
+        }));
     }
 
     let (folders, files) = session.client.shared_counts();
@@ -259,9 +267,11 @@ pub fn run(
 
     save(&store, session.client.as_ref(), &hub, &daemon);
     ctx.out.status("stopping");
-    // The drainer watches the same flag; joining keeps a half-written state
-    // file from racing the process exit.
-    let _ = drainer.join();
+    // Joining keeps a half-written state file from racing the process exit
+    // and leaves no listener or reconnect thread behind.
+    for task in tasks {
+        let _ = task.join();
+    }
     cleanup();
     Ok(())
 }

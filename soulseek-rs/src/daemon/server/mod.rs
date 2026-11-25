@@ -619,9 +619,28 @@ mod tests {
     }
 
     /// A daemon serving a TCP listener on a port the OS picked, as the real
-    /// accept loop does. The loop never returns, so its thread ends with the
-    /// test process.
-    fn serve_on_port_zero(token: &str) -> (std::net::SocketAddr, Arc<Daemon>) {
+    /// accept loop does. Dropping the guard stops the loop and joins its
+    /// thread, so a test failure cannot leave a listener behind.
+    struct TestDaemon {
+        address: std::net::SocketAddr,
+        daemon: Arc<Daemon>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        task: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for TestDaemon {
+        fn drop(&mut self) {
+            self.stop.store(
+                true,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if let Some(task) = self.task.take() {
+                let _ = task.join();
+            }
+        }
+    }
+
+    fn serve_on_port_zero(token: &str) -> TestDaemon {
         let daemon = Arc::new(daemon_with_token(token));
         let listener = bind_tcp("127.0.0.1:0").expect("bind");
         let Listener::Tcp(tcp) = &listener else {
@@ -629,8 +648,17 @@ mod tests {
         };
         let address = tcp.local_addr().expect("local address");
         let served = Arc::clone(&daemon);
-        std::thread::spawn(move || listener.serve(served));
-        (address, daemon)
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loop_stop = Arc::clone(&stop);
+        let task = std::thread::spawn(move || {
+            listener.serve(served, &loop_stop);
+        });
+        TestDaemon {
+            address,
+            daemon,
+            stop,
+            task: Some(task),
+        }
     }
 
     fn connect(address: std::net::SocketAddr) -> std::net::TcpStream {
@@ -678,7 +706,8 @@ mod tests {
     #[test]
     fn an_oversized_request_line_ends_an_authenticated_connection() {
         use std::io::Write;
-        let (address, _daemon) = serve_on_port_zero("secret");
+        let server = serve_on_port_zero("secret");
+        let address = server.address;
         let mut flood = connect(address);
         let reply = authenticate(&mut flood, "secret");
         assert!(reply.contains("\"result\""), "{reply}");
@@ -698,11 +727,17 @@ mod tests {
 
     #[test]
     fn connections_beyond_the_cap_are_refused() {
-        let (address, daemon) = serve_on_port_zero("secret");
+        let server = serve_on_port_zero("secret");
+        let address = server.address;
+        let daemon = Arc::clone(&server.daemon);
         let held: Vec<_> = (0..MAX_CONNECTIONS).map(|_| connect(address)).collect();
         let deadline = Instant::now() + Duration::from_secs(10);
         while daemon.open.load(Ordering::Relaxed) < MAX_CONNECTIONS {
-            assert!(Instant::now() < deadline, "the daemon never served them");
+            assert!(
+                Instant::now() < deadline,
+                "the daemon never served them (open={})",
+                daemon.open.load(Ordering::Relaxed)
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -721,7 +756,8 @@ mod tests {
     #[test]
     fn a_connection_must_authenticate_before_anything_else() {
         use std::io::Write;
-        let (address, _daemon) = serve_on_port_zero("secret");
+        let server = serve_on_port_zero("secret");
+        let address = server.address;
         let mut stream = connect(address);
         writeln!(stream, r#"{{"jsonrpc":"2.0","id":1,"method":"daemon.status"}}"#)
             .expect("send");
