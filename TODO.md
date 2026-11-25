@@ -1,5 +1,5 @@
 Prefix: SOUL
-Next: 20
+Next: 23
 
 ### SOUL-11 · P1 · Same-basename downloads can concatenate or overwrite unrelated partial files
 
@@ -81,6 +81,33 @@ Next: 20
 - **Recommendation:** Change the help text to describe loopback TCP plus SSH forwarding, or deliberately introduce an explicit authenticated remote-control mode if direct LAN access is intended. Keep the refusal test as the negative control for the current contract.
 - **Fix with:** single-source-of-truth
 - **Effort:** S
+
+### SOUL-20 · P2 · Transfer direction is flattened into an unconditional download accept path
+
+- **Area:** Peer protocol correctness
+- **Where:** soulseek-rs-lib/src/types.rs:165-172,472-485; soulseek-rs-lib/src/message/server/message_factory.rs:250-275; soulseek-rs-lib/src/client/operations/transfers.rs:82-140
+- **Problem:** Transfer.direction is an unconstrained u32, the parser always reads a direction-dependent size, and UpdateDownloadTokens never branches on direction. The codec writes direction 0 without size for a download request and direction 1 with size for an upload offer, yet an incoming direction-0 request is handled through the same download-token update path. Even when no local download matches, the peer receives an allowed transfer response rather than a denial. Proven statically from the wire shapes and control flow; no live peer reproduction was run.
+- **Recommendation:** Model TransferRequest direction as a closed type that carries size only where the wire format does, dispatch download requests and upload offers separately, and deny requests that do not match a live queued transfer. Add protocol-level regression tests for direction 0, direction 1, unknown direction, truncation, and no matching token.
+- **Fix with:** reference-parity
+- **Effort:** M
+
+### SOUL-21 · P2 · Server backpressure disconnects the control session instead of deferring writes
+
+- **Area:** Server transport reliability
+- **Where:** soulseek-rs-lib/src/actor/server_actor.rs:372,592-601; soulseek-rs-lib/src/actor/peer_actor.rs:688-724
+- **Problem:** The server socket is nonblocking, but each outbound frame is written with one write_all plus flush and any error disconnects. On a congested or slow server connection, WouldBlock is expected backpressure rather than a fatal session error. The peer actor already has the correct partial-write/pending-write pattern, so the server actor is inconsistent with the transport contract. Structurally proven; no socket-pressure reproduction was run.
+- **Recommendation:** Give the server actor the same bounded pending-write state machine as peer actors: account for partial writes, treat WouldBlock as retryable backpressure, bound queued bytes with explicit disconnect semantics, and test partial writes and recovery.
+- **Fix with:** lifecycle-concurrency
+- **Effort:** M
+
+### SOUL-22 · P2 · Browse and search responses monopolize the singleton client operations loop
+
+- **Area:** Performance and lifecycle
+- **Where:** soulseek-rs-lib/src/client/operations/mod.rs:35-64,770-783; soulseek-rs-lib/src/shares/mod.rs:193-197,217-243; soulseek-rs-lib/src/message/peer/shared_file_list.rs:52-62; soulseek-rs-lib/src/client/operations/search.rs:71-81
+- **Problem:** One thread receives every client operation while also sweeping and polling. Browse construction rebuilds the complete directory listing and compresses it synchronously inside that operation, and search responses scan and collect matches before applying response caps. A large share or hostile burst of metadata requests can delay unrelated transfers, queue polling, connection sweeps, and user operations behind serialization work. The cost path is structurally proven; no latency benchmark was run.
+- **Recommendation:** Move listing construction/compression out of the singleton decision loop or precompute incremental share indexes and cached browse/search responses with explicit invalidation. Bound scan work per operation and measure a large-share browse/search burst against ordinary transfer progress before choosing the design.
+- **Fix with:** make-it-fast
+- **Effort:** M
 
 ### SOUL-9 · P3 · Verify one controlled session against the public Soulseek network
 
