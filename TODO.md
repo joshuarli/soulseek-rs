@@ -1,5 +1,5 @@
 Prefix: SOUL
-Next: 23
+Next: 27
 
 ### SOUL-13 · P1 · Network-facing work still has no aggregate admission and ownership envelope
 
@@ -9,6 +9,33 @@ Next: 23
 - **Recommendation:** Finish RS-1 as one owned admission design: bounded actor and operation queues with explicit block/reject/drop policy, a bounded transfer registry with cancellation tokens and join ownership, builder-based spawn failure handling, and daemon control-connection shutdown ownership. Validate with the existing daemon RSS and stress workloads rather than claiming a budget first.
 - **Fix with:** lifecycle-concurrency
 - **Effort:** L
+
+### SOUL-23 · P2 · Reconnect leaves report_cant_connect sending on a dead dispatcher
+
+- **Area:** Recovery and error propagation
+- **Where:** soulseek-rs-lib/src/client/connection.rs:339-352; soulseek-rs-lib/src/client/operations/mod.rs:253
+- **Problem:** report_cant_connect clones ctx.server_sender, which is set once when a dispatcher starts and is never cleared on disconnect. After a server reconnect the old receiver is gone, send fails, and the error is discarded, so a peer that could not be reached never gets CantConnectToPeer. Proven by source flow; no reconnect reproduction was run.
+- **Recommendation:** Clear and replace server_sender with session state, or route the report through the current server actor handle, and surface send failures instead of discarding them. Add a regression covering disconnect, successful relogin, then a failed peer connection.
+- **Fix with:** lifecycle-concurrency
+- **Effort:** M
+
+### SOUL-24 · P2 · Peer actor carries stale pending_write bytes across a reconnect
+
+- **Area:** Peer transport lifecycle
+- **Where:** soulseek-rs-lib/src/actor/peer_actor.rs:895-902; soulseek-rs-lib/src/actor/server_actor.rs:707
+- **Problem:** disconnect() clears the peer stream and state but not pending_write, while the server actor now clears its equivalent queue. A partially written frame held as backpressure can be flushed onto a new socket after reconnect, mixing bytes from two sessions. Proven structurally; no reconnect reproduction was run.
+- **Recommendation:** Clear pending_write and related backpressure state in peer_actor::disconnect(), and add a regression that disconnects mid-frame, reconnects, and asserts the new socket starts at a frame boundary.
+- **Fix with:** lifecycle-concurrency
+- **Effort:** S
+
+### SOUL-25 · P2 · Locally restored paused downloads cannot be resumed
+
+- **Area:** Durable transfer state
+- **Where:** soulseek-rs/src/ui/main_tui/mod.rs:110-140; soulseek-rs/src/ui/main_tui/downloads.rs:125-140; soulseek-rs/src/api.rs:122
+- **Problem:** A locally owned TUI restores paused rows as display-only entries with a detached sender and no receiver, then calls client.resume_download on a transfer that was never added to the library store. The user's resume action is a silent no-op; daemon-attached resume works through the restored paused hold from SOUL-16. Proven by construction.
+- **Recommendation:** Route local resume through the same held-row start path used by the daemon, or refuse the action with a visible message until that path exists; add a restart/resume regression for local mode.
+- **Fix with:** durable-state
+- **Effort:** M
 
 ### SOUL-9 · P3 · Verify one controlled session against the public Soulseek network
 
@@ -28,3 +55,13 @@ Next: 23
 - **Fix with:** dead-code-archaeology
 - **Effort:** M
 - **Design:** docs/rfc/SOUL-10-decide-the-supported-distribution-contract.md
+
+### SOUL-26 · P3 · Broken rustdoc link fails a strict library doc build
+
+- **Area:** Documentation build
+- **Where:** soulseek-rs-lib/src/client/social.rs:234; soulseek-rs-lib/src/client/mod.rs
+- **Problem:** The queue-position doc links to Client::downloads, which does not exist. RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc -p soulseek-rs-lib --no-deps exits 101 with 'unresolved link to Client::downloads'. Proven by the command.
+- **Recommendation:** Point the link at the real accessor or use plain text, then rerun the strict doc build.
+- **Fix with:** none
+- **Effort:** S
+
