@@ -219,18 +219,18 @@ impl Client {
         downloader: &str,
     ) -> Option<(u32, Arc<AtomicBool>)> {
         let connect_token = next_connect_token();
-        let (claimed, sender) = match context.write_safe() {
-            Ok(mut ctx) => {
-                let Some(claimed) =
-                    ctx.add_brokered_upload(connect_token, token, Arc::clone(file))
-                else {
-                    Self::fail_upload(context, token, "too many brokered uploads");
-                    return None;
-                };
-                (claimed, ctx.server_sender.clone())
-            }
-            Err(_) => return None,
+        let Ok(mut ctx) = context.write_safe() else {
+            return None;
         };
+        let Some(claimed) =
+            ctx.add_brokered_upload(connect_token, token, Arc::clone(file))
+        else {
+            drop(ctx);
+            Self::fail_upload(context, token, "too many brokered uploads");
+            return None;
+        };
+        let sender = ctx.server_sender.clone();
+        drop(ctx);
         let Some(sender) = sender else {
             Self::fail_upload(context, token, "not connected to the server");
             return None;

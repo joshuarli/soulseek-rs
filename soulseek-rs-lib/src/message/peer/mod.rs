@@ -9,6 +9,7 @@ mod shared_file_list;
 mod transfer_request;
 mod transfer_response;
 mod upload_denied;
+mod upload_denied_builder;
 mod upload_failed;
 mod user_info;
 
@@ -33,6 +34,7 @@ pub use shared_file_list::{
 pub use transfer_request::TransferRequest;
 pub use transfer_response::TransferResponse;
 pub use upload_denied::UploadDeniedHandler;
+pub use upload_denied_builder::build_upload_denied;
 pub use upload_failed::UploadFailedHandler;
 pub use user_info::{
     PeerInfo, UserInfoRequest, UserInfoResponseHandler, build_user_info,
