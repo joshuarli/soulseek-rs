@@ -13,9 +13,13 @@ Next: 9
 - [x] Daemon control kept local; non-loopback plaintext TCP refused; token
       created 0600 atomically; socket mode tested.
 - [x] Docs, network contract, CI server-backed job, `make bench` target.
-- [ ] Server-backed verification on this host: no soulfind/D toolchain
-      available (CI job added; local run blocked).
-- [ ] Independent-client (Nicotine+) interoperability: not available locally.
+- [x] Server-backed verification: local soulfind built from source; full
+      `SOULSEEK_E2E_REQUIRED=1` suite passed on macOS with two test threads
+      (one earlier run failed only under default parallelism, when 100
+      concurrent soulfind instances exhausted this host).
+- [ ] Independent-client (Nicotine+) interoperability: GUI client not
+      available in this environment; unverified.
+- [ ] Public-network smoke test: no purpose-provided credentials; not run.
 
 ### SOUL-4 · P3 · Bidirectional overrides in peer text can reorder what the terminal shows
 

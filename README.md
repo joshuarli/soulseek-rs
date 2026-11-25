@@ -792,9 +792,12 @@ SOULFIND_BIN=/path/to/soulfind/bin/soulfind \
 
 > On macOS, soulfind's `sqlite3_config` call is rejected by the system SQLite
 > and the server dies at startup with `SQLite error 7 (out of memory)`, which
-> the suite reports as a skip. Run the tests with
-> `DYLD_LIBRARY_PATH=/opt/homebrew/opt/sqlite/lib` so soulfind picks up
-> Homebrew's SQLite instead; no patching needed.
+> the suite reports as a skip. Run with
+> `DYLD_LIBRARY_PATH=/opt/homebrew/opt/sqlite/lib`. If `otool -L` shows the
+> binary still loading `/usr/lib/libsqlite3.dylib`, repoint the disposable test
+> binary with `install_name_tool -change /usr/lib/libsqlite3.dylib
+> /opt/homebrew/opt/sqlite/lib/libsqlite3.dylib <binary>`; the link path is
+> baked into the binary, so the environment variable alone cannot move it.
 
 Set `SOULSEEK_E2E_REQUIRED=1` to turn a missing server into a hard failure
 instead of a skip. The `integration` job in `ci.yml` builds soulfind from

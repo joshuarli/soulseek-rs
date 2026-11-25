@@ -55,4 +55,5 @@ jobs:
         env:
           SOULFIND_BIN: ${{ runner.temp }}/soulfind/bin/soulfind
           SOULSEEK_E2E_REQUIRED: "1"
+          RUST_TEST_THREADS: "2"
         run: make test
