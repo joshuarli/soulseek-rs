@@ -39,6 +39,10 @@ pub(super) const MAX_LINE: u64 = 1 << 20;
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long to wait before accepting again after a failure.
+/// A nonblocking accept with nothing pending must still check the stop flag,
+/// but sleeping the full error backoff here would stall bursts of short-lived
+/// clients long enough to exhaust the connection cap.
+const ACCEPT_POLL: Duration = Duration::from_millis(1);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// How many control connections may be open at once. Far above any real use
@@ -149,7 +153,7 @@ impl Listener {
                     spawn_connection(stream, Arc::clone(&daemon));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(ACCEPT_BACKOFF);
+                    std::thread::sleep(ACCEPT_POLL);
                 }
                 Err(e) => {
                     soulseek_rs::warn!("control accept failed: {e}");
