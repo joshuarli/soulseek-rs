@@ -44,8 +44,7 @@ cargo test
 The end-to-end suite needs a Soulseek server. Point `SOULFIND_BIN` at a
 [soulfind](https://github.com/soulfind-dev/soulfind) binary and the `e2e` tests
 run against it; without it they skip. `SOULSEEK_E2E_REQUIRED=1` turns a skip
-into a failure, but the pull request workflow does not set it. See
-`CONTRIBUTING.md` for the rest.
+into a failure; the server-backed CI job sets it.
 
 ## Current work
 
@@ -53,45 +52,36 @@ The single active plan, including the networking completion campaign, is
 [`docs/roadmap.md`](docs/roadmap.md). Resume from its **Status**; do not create
 a separate campaign document.
 
+Topic docs: [daemon control protocol](docs/daemon-protocol.md),
+[network contract](docs/network-contract.md),
+[protocol coverage](docs/protocol-coverage.md), and
+[benchmarks](benchmarks/README.md). Open design decisions live in
+[`docs/rfc/`](docs/rfc/).
+
 ## Verification
 
-`make clean` removes this checkout’s build output in `./target`. It refuses symlinks and ordinary files at those paths.
+`make clean` removes this checkout’s build output in `./target` and refuses
+symlinks or ordinary files at that path.
 
-- `make test` (CI: `.github/workflows/ci.yml`, on `pull_request` and pushes to
-  `main`): 1094 passed, 2 ignored, including the five PTY snapshot frames;
-  cold 251.87s, warm 27s to 64s on a busy macOS host with four build jobs.
-  `make lint` (`lint.yml`): cold 180.94s, warm 39s to 86s, clippy on all targets
-  with `-D warnings`.
-- Server-backed verification with `SOULFIND_BIN` and `SOULSEEK_E2E_REQUIRED=1`
-  after the closure work: all cases passed except
-  `json_records_carry_every_extra_field_the_readme_names`, a login timeout that
-  reproduces on the pre-campaign commit. An earlier full run at `6ed4d85` was
-  green (1084 passed); host load makes individual soulfind instances flaky.
-- Independent-client interoperability: `scripts/interop_nicotine.py` drives
-  headless Nicotine+ against a running daemon and checks both browse and
-  download directions. Nicotine+ config values must be unquoted.
-- Resource evidence: `scripts/daemon_rss.sh` writes a revisioned RSS/thread
-  envelope only after every required workload operation succeeds and both
-  transfers hash-match. RS-1 remains open: the actor mailboxes and operation
-  channel are still unbounded; see `benchmarks/README.md`.
-- Tiers (warm): unit about 770 tests (`soulseek-rs`, `soulseek-rs-lib`; 1s each); local-socket tests (daemon transport bounds in
-  `src/daemon/server`, `resume_e2e.rs`, `persist_e2e.rs`); server e2e 208 tests
-  (`cli_e2e`, `daemon_protocol_e2e`, `tui_e2e`, lib `e2e`: client and peer
-  protocol) that need soulfind
-  (`SOULFIND_BIN` or `soulfind/bin/soulfind`) and return early, counted as
-  passing, without it (SOUL-2). `make test` never reaches the real network.
-- CLI flags and exit codes: `soulseek-rs/tests/cli_e2e.rs` (soulfind), unit
-  tests in `src/output.rs` and `src/cli`. Daemon JSON-RPC, authentication and
-  framing limits: unit tests in `src/daemon/server`, plus `daemon_protocol_e2e.rs`.
-- TUI: window logic over a test backend in `src/ui`; terminal output of peer
-  text in `src/ui/tui/buffer.rs`; PTY frames in `tests/tui_snapshots.rs` run in
-  `make test` with `--features fixtures`. Re-record with
-  `PTYTEST_UPDATE_SNAPSHOTS=1` only after an intended UI change.
-- Performance workloads: `soulseek-rs-lib/examples/stress.rs` requires a local
-  server; a repeatable local-server baseline has not been established. The
-  deterministic frame-draw and message-parse benchmarks run under `cargo bench`,
-  outside `make test`.
-- Coverage and mutation tools (`cargo-llvm-cov`, `cargo-mutants`) are not
-  installed; new boundary tests are proven with a hand-injected fault.
-- Vendored IGD (`soulseek-rs/src/port_mapping/igd/`): https://github.com/dariusc93/rust-igd,
-  version 0.17.1, revision not recorded, modified here (commit `0737f12`).
+- `make test` runs the workspace tests plus the five PTY snapshot frames with
+  `--features fixtures`; use `PTYTEST_UPDATE_SNAPSHOTS=1` only after an intended
+  UI change. `make lint` is clippy on all targets with `-D warnings`.
+- `make test` never reaches the public Soulseek network. Server-backed tests
+  (`cli_e2e`, `daemon_protocol_e2e`, `tui_e2e`, and the library e2e tests) need
+  soulfind through `SOULFIND_BIN` or `soulfind/bin/soulfind`; without it they
+  return early as passes. `SOULSEEK_E2E_REQUIRED=1` makes that skip fail.
+- CLI flags and exit codes also have unit coverage in `src/output.rs` and
+  `src/cli`; daemon JSON-RPC, authentication, and framing limits are covered in
+  `src/daemon/server` and `daemon_protocol_e2e.rs`.
+- `scripts/interop_nicotine.py` drives headless Nicotine+ against a running
+  daemon for both browse and download directions. Nicotine+ config values must
+  be unquoted.
+- `scripts/daemon_rss.sh` records a revisioned RSS/thread envelope only after
+  its workload succeeds and both transfers hash-match. RS-1 remains open: actor
+  mailboxes and operation channels are still unbounded; see
+  `benchmarks/README.md`.
+- `soulseek-rs-lib/examples/stress.rs` requires a local server; deterministic
+  frame-draw and message-parse benchmarks run under `cargo bench`, outside
+  `make test`. Coverage and mutation tools are not installed.
+- Vendored IGD (`soulseek-rs/src/port_mapping/igd/`) derives from
+  https://github.com/dariusc93/rust-igd version 0.17.1, modified here.

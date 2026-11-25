@@ -56,7 +56,7 @@ told nothing and receives no events.
 
 ```json
 --> {"jsonrpc":"2.0","id":1,"method":"auth","params":{"protocol":1}}
-<-- {"jsonrpc":"2.0","id":1,"result":{"protocol":1,"daemon_version":"13.0.0","username":"you"}}
+<-- {"jsonrpc":"2.0","id":1,"result":{"protocol":1,"daemon_version":"19.1.0","username":"you"}}
 ```
 
 Compare `protocol` with your own and fail loudly on a mismatch rather than
@@ -176,7 +176,7 @@ answering everybody else.
 ```console
 $ nc -U ~/.local/share/soulseek-rs/state/daemon.sock
 {"jsonrpc":"2.0","id":1,"method":"auth","params":{"protocol":1}}
-{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"daemon_version":"13.0.0","username":"you"}}
+{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"daemon_version":"19.1.0","username":"you"}}
 {"jsonrpc":"2.0","id":2,"method":"search.start","params":{"query":"aphex twin"}}
 {"jsonrpc":"2.0","id":2,"result":{"ok":true}}
 {"jsonrpc":"2.0","id":3,"method":"search.results","params":{"query":"aphex twin"}}

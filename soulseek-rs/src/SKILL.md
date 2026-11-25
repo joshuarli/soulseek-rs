@@ -189,8 +189,8 @@ participant.
 progress on stderr and nothing on stdout; it does not return until stopped.
 While it runs, every other command on this machine uses its session
 automatically, with no flags, no credentials, and no second login.
-`--bind ADDR` also accepts connections from other machines, which need the
-token.
+`--bind ADDR` also accepts loopback TCP connections, which need the token;
+use an SSH tunnel for another machine. Non-loopback binds are refused.
 State lives in the daemon, so every client reads the same thing: `search` sees
 searches any client ran, the transfer queue is shared, and `message read`
 starts from the conversation the daemon already collected rather than only
@@ -204,11 +204,12 @@ what arrives while it runs.
 clients never need it.
 
 The daemon can also be on a *different* machine, such as a home server or NAS
-doing the downloading. Point at it once with `config set daemon host:5030` and
-`config set daemon_token <token>`, and every command afterwards drives that
-machine; files land there, not here. The interface is an open JSON-RPC schema
-(`rpc.discover` serves it), so a purpose-built client is a reasonable thing to
-write.
+doing the downloading. Run it there with `--bind 127.0.0.1:5030`, forward that
+loopback port over SSH, then point at the tunnel once with
+`config set daemon 127.0.0.1:5030` and `config set daemon_token <token>`. Every
+command afterwards drives that machine; files land there, not here. The
+interface is an open JSON-RPC schema (`rpc.discover` serves it), so a
+purpose-built client is a reasonable thing to write.
 
 **`shares list`** — one object per configured folder: `directory`, `usable`.
 **`shares add <directory>`** and **`shares remove <directory>`** — change the

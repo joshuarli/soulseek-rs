@@ -2,8 +2,8 @@
 
 This document describes the connections this application may make, what
 triggers them, and the limits that keep a laptop predictable. All components
-(runtime, daemon, CLI, TUI, index and transfers) stay on the same machine.
-There is no relay, proxy, hosted service or remote download box.
+run in one process or daemon. There is no relay, proxy, or hosted service; a
+remote download box is reached through the operator's own encrypted tunnel.
 
 Native Soulseek traffic is **not** encrypted by the daemon control transport
 described below; the protocol frames are the reference client's frames.
@@ -15,7 +15,7 @@ described below; the protocol frames are the reference client's frames.
 | Central server | Login, search coordination, peer addresses, brokered connects | One session start (CLI/TUI/`serve`/daemon) | TCP outbound; no bind | `server` setting, default `server.slsknet.org:2416` | Yes, when a session opens | One per session; connect 10s, login verdict 30s, caller wait 45s; daemon reconnect backs off 1→60s and stops after 12 failures or an auth rejection |
 | Soulseek peer listener | Incoming peer control and file-transfer connections | Session start with `enable_listen` | TCP listener on `0.0.0.0:<listener_port>`; ephemeral fallback when occupied | Local bind only | **Yes** | Port advertised is the bound port; 128 half-open handshakes, refused when full; 10s peer-init deadline, 4096-byte init cap; 100ms accept-error backoff |
 | Established peer control | Browse, search replies, chat, transfer offers | Direct dial or accepted handshake | TCP, ephemeral local port | Server address or accepted socket | Yes, on demand | 512 peers; per-user replacement after 30s; 5s dial / 20s connect-state / 5min idle; 32MiB pending-write cap; 256KiB actor stacks |
-| File transfers | Upload and download bytes | Accepted transfer offer or resume | TCP, ephemeral local port | Peer address, server-brokered connect, or `PierceFirewall` | Yes, on demand | Upload slots 10; queued uploads 1024 total / 16 per peer; pending brokered connects 256; pending upload serves 256 / 64 per peer, 60s TTL; dial 20s, read/write 5–30s; cancelled on shutdown; `.part` resume |
+| File transfers | Upload and download bytes | Accepted transfer offer or resume | TCP, ephemeral local port | Peer address, server-brokered connect, or `PierceFirewall` | Yes, on demand | Upload slots 10; queued uploads 1024 total / 16 per peer; pending brokered connects 256; pending upload serves 256 / 64 per peer, 60s TTL; dial 20s, read/write 5–30s; bounded transfer deadlines; `.part` resume |
 | Distributed parent candidates / parent | Leaf participation in distributed search | Server offers candidate parents | TCP outbound, ephemeral local port | Server's candidate list | Yes (leaf) | 10 candidates, at most one parent; dial 10s, idle link 1min, 64KiB frame cap; 50 searches/s admitted from the parent |
 | Distributed children | Serve search stream to peers below us | Explicit `accept_children`, peer connects | TCP accepted on the peer listener | Incoming child socket | **No** | 10 children, speed-derived cap; 5s write timeout; searches broadcast only when fed |
 | Pending brokered requests | Server asks the other peer to connect back | Direct dial failed | TCP via server coordination | Server's `ConnectToPeer` message | Yes, on demand | 20s token deadline, swept each second; caps above |
@@ -54,9 +54,11 @@ Daemon event and writer queues disconnect a client that falls behind instead of
 buffering without limit. A rejected relogin is terminal and is never retried;
 transient failures keep a bounded slow retry, and daemon stop cancels an active
 login wait. Broker-admission refusal fails the queued downloads it would
-otherwise strand, with a retryable cause. Actor mailboxes and the client
-operation channel are still unbounded: their admission control is outstanding
-work, not a claimed resource bound.
+otherwise strand, with a retryable cause. Actor mailboxes, the client
+operation channel, transfer-thread ownership, and decompression concurrency
+still lack
+aggregate admission control: that is outstanding work, not a claimed resource
+bound.
 
 The stress workload (`scripts/stress.sh`, `soulseek-rs-lib/examples/stress.rs`)
 reports its thread count and peak RSS for the **whole process**, which includes

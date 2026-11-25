@@ -1,9 +1,4 @@
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="website/public/wordmark-on-dark.svg">
-    <img src="website/public/wordmark-on-light.svg" alt="soulseek-rs" width="340">
-  </picture>
-</div>
+# soulseek-rs
 
 **A Soulseek client and lib built in Rust 🦀 for the terminal: TUI, CLI and daemon. Built for agents and people who live there.**
 
@@ -18,9 +13,8 @@ enthusiasts to share niche music. This repository is that client plus
 [`soulseek-rs-lib`](./soulseek-rs-lib), the protocol library under it. Check the website: **[re-invention.nl/soulseek-rs](https://re-invention.nl/soulseek-rs/)** for more information/documentation.
 
 
-***Quick install:***
-
-`curl -fsSL https://re-invention.nl/soulseek-rs/install.sh | sh`
+***Quick install:*** download and verify a release archive as described in
+[Installation](#installation).
 
 
 
@@ -44,8 +38,8 @@ enthusiasts to share niche music. This repository is that client plus
 - **Upload queue**: a slot cap, server-listed privileged users first, and a
   truthful answer when a peer asks their place in line
 - **Browse**: list any user's shared files and download straight from the tree
-- **Resumable downloads**: a dead transfer leaves a `.part`, and re-running it
-  asks the peer for only what is missing
+- **Resumable downloads**: a dead transfer leaves a `.part`; when its name and
+  length match the next attempt, only the missing bytes are requested
 - **Cancel a transfer**: `x` in the TUI or `transfer cancel` from a script stops
   a download, queued or in progress, and deletes its `.part`; uploads too
 - **Chat rooms**: list, join, and talk in public rooms, several open at once
@@ -67,8 +61,8 @@ programming and reverse engineering.
 
 A Cargo workspace with two crates: **soulseek-rs-lib**, the protocol
 implementation for anyone building their own client, and **soulseek-rs**, the
-client built on it. The library stays lean on dependencies and has none today;
-the client takes them freely.
+client built on it. The library uses only `libc`; the client takes dependencies
+freely.
 
 The library covers the modern protocol in full: every server, peer and
 distributed message that current clients still speak, each one proven against a
@@ -88,81 +82,30 @@ project is identifiable on the network.
 
 ## Installation
 
-The installer picks the right macOS or Linux binary, verifies its sha256, and
-installs the latest stable release (through Homebrew when it is available):
+This repository's release workflow publishes prerelease archives, not packages.
+Download the archive for your machine from the newest `release-<sha>` prerelease
+on [the repository's Releases page](https://github.com/joshuarli/soulseek-rs/releases), verify it against the `SHA256SUMS` asset,
+unpack it, and put the binary on your `PATH`:
+
+- `soulseek-rs-aarch64-apple-darwin.tar.xz`
+- `soulseek-rs-aarch64-unknown-linux-musl-static.tar.xz`
+- `soulseek-rs-x86_64-unknown-linux-musl-static.tar.xz`
+
+A `.tar.xz` contains one executable. It does not update itself; install a newer
+archive over it. The Linux executables are static and include the man page and
+completions through `soulseek-rs man` and `soulseek-rs completions print`.
+
+From source, Rust 1.91 or newer is required:
 
 ```bash
-curl -fsSL https://re-invention.nl/soulseek-rs/install.sh | sh
+cargo build --release
 ```
 
-To install the current successful build from `develop` instead, pass the
-installer's `--nightly` option through to `sh`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/michel/soulseek-rs/develop/website/public/install.sh | sh -s -- --nightly
-```
-
-Nightly is a mutable prerelease rebuilt every day and whenever the **Nightly**
-workflow is run by hand. It bypasses Homebrew, and may be less stable than a
-numbered release. A failed download, checksum, or startup check leaves an
-existing binary untouched.
-
-Or install it with a package manager. Stable follows the latest release:
-
-```bash
-# Debian, Ubuntu, Mint (on ARM: arm64 for amd64)
-curl -fsSLO https://github.com/michel/soulseek-rs/releases/latest/download/soulseek-rs-amd64.deb
-sudo apt install ./soulseek-rs-amd64.deb
-
-# Fedora, RHEL (on ARM: aarch64 for x86_64)
-sudo dnf install https://github.com/michel/soulseek-rs/releases/latest/download/soulseek-rs-x86_64.rpm
-
-# Homebrew, on macOS and Linux
-brew install michel/tap/soulseek-rs
-
-# cargo-binstall fetches the release binary and compiles nothing
-cargo binstall soulseek-rs
-
-# From source: Rust 1.91 or newer. Debian 13 and Ubuntu 24.04 default to an older one
-cargo install --locked soulseek-rs
-```
-
-Nightly is the tip of `develop`. The `.deb` and `.rpm` are downloads;
-Homebrew and cargo build it from source:
-
-```bash
-curl -fsSLO https://github.com/michel/soulseek-rs/releases/download/nightly/soulseek-rs-nightly-amd64.deb
-sudo apt install ./soulseek-rs-nightly-amd64.deb
-
-sudo dnf install https://github.com/michel/soulseek-rs/releases/download/nightly/soulseek-rs-nightly-x86_64.rpm
-
-brew install --HEAD michel/tap/soulseek-rs
-
-cargo install --locked --git https://github.com/michel/soulseek-rs --branch develop soulseek-rs
-```
-
-A `.deb` or `.rpm` does not update itself. Install the newer file over it. A
-nightly sorts above the release it follows, so going back to stable is a
-downgrade. In a script apt refuses one without `--allow-downgrades`, while dnf
-goes ahead. Both carry the man page and completions for bash, zsh and fish.
-A release download prints `19.0.0 (git abc123456789)`. A nightly download reads
-`19.0.0+git202609141144.deb846b (git abc123456789)`: the last release, the
-commit's time in UTC, and the commit. A Homebrew `--HEAD`
-build reports `HEAD-deb846b (git abc123456789)`. A `cargo install` from git
-sets no version, so it prints `19.0.0 (git abc123456789)` too.
-
-From source, `cargo build --release` leaves the binary at
-`target/release/soulseek-rs`. To build your own client on the protocol library,
-run `cargo add soulseek-rs-lib`.
-
-To package it for a distribution: a musl build is static, a glibc build links
-only libc, libm and libgcc_s,
-`soulseek-rs completions print <shell>` and `soulseek-rs man` write the
-completion scripts and the man page to stdout, and a build with
-`SOULSEEK_RS_VERSION` set reports that instead of the crate version. The git
-SHA is embedded at build time; a source archive with no `.git` embeds
-`000000000000` unless `SOULSEEK_RS_GIT_SHA` names the commit. The nfpm recipe
-behind the `.deb` and `.rpm` is in [`packaging/`](packaging).
+The binary is `target/release/soulseek-rs`. To build your own client on the
+protocol library, run `cargo add soulseek-rs-lib`. A build with
+`SOULSEEK_RS_VERSION` set reports that instead of the crate version. The git SHA
+is embedded at build time; a source archive with no `.git` embeds `000000000000`
+unless `SOULSEEK_RS_GIT_SHA` names the commit.
 
 ## Usage
 
@@ -263,24 +206,30 @@ drives the daemon against the laptop's wishes.
 #### A download box you drive from your laptop
 
 Put soulseek-rs on the machine that should be downloading: a home server, a
-NAS, a Raspberry Pi. **On that machine**, let the daemon take connections from
-your network:
+NAS, a Raspberry Pi. **On that machine**, let the daemon take loopback TCP
+connections:
 
 ```bash
-soulseek-rs daemon --bind 0.0.0.0:5030
+soulseek-rs daemon --bind 127.0.0.1:5030
 ```
 
-It prints the token on stderr at startup, with the two `config set` lines to
-paste on the other machine. `daemon token` prints it again, always *this*
-machine's, so run it on the box. It needs no terminal and nobody logged in;
-hand it to systemd or launchd. Run the unit as the user who types the commands,
-or export the same `SOULSEEK_STATE_DIR` in both, because a client looks for the
-socket under its own state directory.
+It prints the token on stderr at startup. `daemon token` prints it again,
+always *this* machine's, so run it on the box. Run the service as the user who
+types the commands, or export the same `SOULSEEK_STATE_DIR` in both, because a
+client looks for the socket under its own state directory.
 
-**On your laptop**, say once where it lives:
+The control protocol has no encryption, and the daemon refuses non-loopback
+binds. Reach the box over SSH instead:
 
 ```bash
-soulseek-rs config set daemon nas.local:5030
+ssh -L 5030:127.0.0.1:5030 nas.local
+```
+
+**On your laptop**, while the tunnel is open, say once where the loopback end
+lives:
+
+```bash
+soulseek-rs config set daemon 127.0.0.1:5030
 soulseek-rs config set daemon_token <the token you copied>
 ```
 
@@ -305,11 +254,7 @@ to a remote daemon changes its live session while writing the *laptop's* config
 file, so put the change in the daemon's own `config.toml` as well, or push it
 again after a restart.
 
-That TCP port has no encryption. Fine on a home network; do not expose it to
-the internet. Reach it over SSH instead, with a tunnel
-(`ssh -L 5030:localhost:5030 nas`) or by running the commands on the box.
-
-#### Build your own remote
+#### Write your own remote client
 
 The daemon speaks newline-delimited JSON-RPC 2.0, described by an
 [OpenRPC](https://open-rpc.org) document,
@@ -501,8 +446,6 @@ soulseek-rs user someuser --json | jq -e '.status != "offline"'
 
 ### Agent skills
 
-[![an agent loading the soulseek-rs skill and downloading tracks](website/public/agent-demo.svg)](https://re-invention.nl/soulseek-rs/#agents)
-
 `--help` lists flags but cannot say which JSON keys a record carries or what
 exit 4 means. That lives in a skill file shipped inside the binary:
 
@@ -580,9 +523,9 @@ daemon's shares and listener are the ones peers reach.
 
 Downloads run under `--timeout` (300s) and `--max-concurrent-downloads` at a
 time, so an unattended run always ends. An interrupted one resumes: bytes stream
-into `<file>.part` and it is renamed only once whole, so re-running the same
-`download` asks the peer to start at the offset already on disk. Partial files
-are never offered to peers, and deleting the `.part` starts over.
+into `<file>.part` and it is renamed only once whole. A later attempt uses a
+shorter same-named `.part` as its starting offset; deleting the `.part` starts
+over. Partial files are never offered to peers.
 
 ### Configuration
 
@@ -754,77 +697,11 @@ parent, optional children at 10, upload slots at 10, queued uploads at 1024
 (16 per peer), pending brokered connects at 256, pending upload serves at 256
 (64 per peer), and each message
 buffer at 16 MiB. Searches admitted from the parent or the server are budgeted
-at 50/s each. Downloads and uploads have bounded dial/read/write deadlines and
-are cancelled on shutdown; daemon control allows 64 clients with 1024-entry
+at 50/s each. Downloads and uploads have bounded dial, read, and write
+deadlines; daemon control allows 64 clients with 1024-entry
 event and writer queues and a 1 MiB frame cap. See
 [the network contract](docs/network-contract.md) for the per-class table and
 tuning notes.
-
-## Development
-
-```bash
-RUST_LOG=trace cargo run   # run with debug and trace output
-cargo test
-cargo clippy
-```
-
-### End-to-end tests
-
-Four suites run against [soulfind](https://github.com/soulfind-dev/soulfind),
-a local Soulseek server: `soulseek-rs-lib/tests/e2e.rs` covers the protocol
-library, `soulseek-rs/tests/cli_e2e.rs` drives the binary the way a script
-would, `soulseek-rs/tests/daemon_protocol_e2e.rs` meets the daemon's control
-protocol as a third party would, and `soulseek-rs/tests/tui_e2e.rs` drives the
-window with key presses and reads the screen back. All are
-**server-optional**, running when a server is available and skipping
-otherwise, so `cargo test` stays green everywhere.
-
-Every suite spawns soulfind from `SOULFIND_BIN=/path/to/soulfind` (or a
-`soulfind/bin/soulfind` checkout in a parent directory) on an ephemeral port
-with a throwaway database. The library and CLI suites take
-`SOULSEEK_TEST_SERVER=host:port` first, to run against a server already up.
-
-```bash
-# Build soulfind once (see its BUILDING.md), then:
-SOULFIND_BIN=/path/to/soulfind/bin/soulfind \
-  cargo test --workspace -- --nocapture
-```
-
-> On macOS, soulfind's `sqlite3_config` call is rejected by the system SQLite
-> and the server dies at startup with `SQLite error 7 (out of memory)`, which
-> the suite reports as a skip. Run with
-> `DYLD_LIBRARY_PATH=/opt/homebrew/opt/sqlite/lib`. If `otool -L` shows the
-> binary still loading `/usr/lib/libsqlite3.dylib`, repoint the disposable test
-> binary with `install_name_tool -change /usr/lib/libsqlite3.dylib
-> /opt/homebrew/opt/sqlite/lib/libsqlite3.dylib <binary>`; the link path is
-> baked into the binary, so the environment variable alone cannot move it.
-
-Set `SOULSEEK_E2E_REQUIRED=1` to turn a missing server into a hard failure
-instead of a skip. The `integration` job in `ci.yml` builds soulfind from
-source and sets it, so those suites really execute there; a plain `make test`
-on a machine without soulfind still skips them and must not be read as
-integration coverage.
-
-```bash
-SOULSEEK_E2E_REQUIRED=1 SOULFIND_BIN=/path/to/soulfind/bin/soulfind make test
-make bench   # mixed-load stress workload; needs SOULFIND_BIN, never runs in CI
-```
-
-### Continuous integration
-
-`.github/workflows/ci.yml` runs on every push and pull request:
-
-- **Clippy**: `cargo clippy --workspace --all-targets -- -D warnings`.
-- **Test**: `cargo test --verbose` on Linux and macOS.
-- **End-to-end**: builds soulfind from source (LDC + `dub build :server`),
-  points `SOULFIND_BIN` at it, and runs all four e2e suites with
-  `SOULSEEK_E2E_REQUIRED=1`, so a missing server fails instead of skipping.
-
-## Contributing
-
-Issues and pull requests both welcome. Branch off `main`, keep the change
-small, and see [CONTRIBUTING.md](./CONTRIBUTING.md) for the commit convention
-and the checks CI runs.
 
 ## License
 
