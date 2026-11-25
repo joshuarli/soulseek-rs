@@ -49,10 +49,14 @@ pub const TOKEN_NAME: &str = "daemon.token";
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_mins(1);
-/// After this many consecutive failed re-logins the daemon stops trying:
-/// a server refusing our credentials will not start accepting them because we
-/// asked again, and an endless retry is a thread and a socket forever.
-const MAX_RECONNECT_FAILURES: u32 = 12;
+/// Fast retries cover an ordinary drop: they recover in seconds and never
+/// hammer the server. Past this budget the outage is long, so the worker
+/// switches to a slow loop rather than giving up — a restored network must
+/// bring the daemon back without a restart.
+const FAST_RETRY_BUDGET: u32 = 12;
+/// A long outage costs one login attempt per minute, bounded in rate but not
+/// in count, until the server answers or the daemon is stopped.
+const SLOW_RETRY_INTERVAL: Duration = RECONNECT_BACKOFF_CAP;
 
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
@@ -319,6 +323,58 @@ const fn should_reconnect(loss: Option<SessionLoss>, owned: bool) -> bool {
     owned && matches!(loss, Some(SessionLoss::Disconnected))
 }
 
+/// The slice of a session the reconnect worker needs. Keeping it narrow lets
+/// the retry policy be tested without a logged-in client or a server.
+trait ReconnectSession {
+    fn is_owned(&self) -> bool;
+    fn loss(&self) -> Option<SessionLoss>;
+    fn relogin(&self) -> soulseek_rs::Result<bool>;
+}
+
+impl ReconnectSession for Arc<dyn SessionApi> {
+    fn is_owned(&self) -> bool {
+        self.daemon_endpoint().is_none()
+    }
+    fn loss(&self) -> Option<SessionLoss> {
+        SessionApi::session_loss(self.as_ref())
+    }
+    fn relogin(&self) -> soulseek_rs::Result<bool> {
+        SessionApi::relogin(self.as_ref())
+    }
+}
+
+trait ReconnectReporter {
+    fn status(&self, message: &str);
+    fn warn(&self, message: &str);
+}
+
+impl ReconnectReporter for Out {
+    fn status(&self, message: &str) {
+        Self::status(self, message);
+    }
+    fn warn(&self, message: &str) {
+        Self::warn(self, message);
+    }
+}
+
+/// Waiting, injected so a long outage can be tested without waiting minutes.
+trait ReconnectTimings {
+    fn poll(&self) -> Duration;
+    /// Wait out `duration`, returning `false` if the daemon was asked to stop.
+    fn wait(&self, duration: Duration, stop: &AtomicBool) -> bool;
+}
+
+struct SystemTimings;
+
+impl ReconnectTimings for SystemTimings {
+    fn poll(&self) -> Duration {
+        hub::POLL
+    }
+    fn wait(&self, duration: Duration, stop: &AtomicBool) -> bool {
+        wait_or_stop(duration, stop)
+    }
+}
+
 fn reconnect_loop(
     session: &Arc<dyn SessionApi>,
     daemon: &Daemon,
@@ -326,51 +382,95 @@ fn reconnect_loop(
     address: &str,
     stop: &AtomicBool,
 ) {
-    let owned = session.daemon_endpoint().is_none();
+    reconnect(
+        session,
+        address,
+        stop,
+        &SystemTimings,
+        out,
+        || rejoin(out, session.as_ref(), daemon),
+    );
+}
+
+/// One worker relogins at a time. A rejected login and a displaced name are
+/// terminal; a transport failure is not — after the fast budget the worker
+/// keeps a slow, bounded rate going until the session returns or we stop.
+fn reconnect<S: ReconnectSession, R: ReconnectReporter, T: ReconnectTimings>(
+    session: &S,
+    address: &str,
+    stop: &AtomicBool,
+    timings: &T,
+    reporter: &R,
+    rejoin: impl Fn(),
+) {
+    if !session.is_owned() {
+        return;
+    }
     let mut failures = 0u32;
     let mut announced = false;
+    let mut slow = false;
     while !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(hub::POLL);
-        if !should_reconnect(session.session_loss(), owned) {
+        if !timings.wait(timings.poll(), stop) {
+            return;
+        }
+        let loss = session.loss();
+        if !should_reconnect(loss, true) {
+            if matches!(loss, Some(SessionLoss::Displaced)) {
+                reporter.warn(&format!(
+                    "another login displaced this session at {address}; not \
+                     fighting for the name — fix the other client and restart"
+                ));
+                return;
+            }
             failures = 0;
             announced = false;
+            slow = false;
             continue;
         }
         if !announced {
-            out.status(&format!(
+            reporter.status(&format!(
                 "the connection to {address} dropped; logging back in…"
             ));
             announced = true;
         }
         match session.relogin() {
             Ok(true) => {
-                out.status("logged back in");
-                rejoin(out, session.as_ref(), daemon);
+                reporter.status(&format!("logged back in to {address}"));
+                rejoin();
                 failures = 0;
                 announced = false;
+                slow = false;
             }
             Ok(false) => {
-                out.warn(
+                reporter.warn(
                     "the server rejected the login; the daemon will not retry \
                      with rejected credentials — fix the password and restart",
                 );
                 return;
             }
             Err(e) => {
-                let wait = backoff(failures);
-                failures = failures.saturating_add(1);
-                if failures >= MAX_RECONNECT_FAILURES {
-                    out.warn(&format!(
-                        "login failed {failures} times ({e}); giving up on \
-                         reconnecting — restart to try again"
+                if !slow && failures >= FAST_RETRY_BUDGET {
+                    slow = true;
+                    reporter.status(&format!(
+                        "still disconnected from {address}; retrying every {}s \
+                         until it comes back",
+                        SLOW_RETRY_INTERVAL.as_secs()
                     ));
+                }
+                let wait = if slow {
+                    SLOW_RETRY_INTERVAL
+                } else {
+                    backoff(failures)
+                };
+                failures = failures.saturating_add(1);
+                reporter.warn(&format!(
+                    "cannot log back in: {e}; retrying in {}s (attempt {failures}{})",
+                    wait.as_secs(),
+                    if slow { ", slow retries" } else { "" }
+                ));
+                if !timings.wait(wait, stop) {
                     return;
                 }
-                out.warn(&format!(
-                    "cannot log back in: {e}; trying again in {}s",
-                    wait.as_secs()
-                ));
-                wait_or_stop(wait, stop);
             }
         }
     }
@@ -380,11 +480,16 @@ fn backoff(failures: u32) -> Duration {
     Duration::from_secs(1 << failures.min(6)).min(RECONNECT_BACKOFF_CAP)
 }
 
-fn wait_or_stop(total: Duration, stop: &AtomicBool) {
+fn wait_or_stop(total: Duration, stop: &AtomicBool) -> bool {
     let deadline = Instant::now() + total;
-    while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(hub::POLL);
+    while !stop.load(Ordering::Relaxed) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(hub::POLL));
     }
+    false
 }
 
 fn rejoin(out: &Out, session: &dyn SessionApi, daemon: &Daemon) {
@@ -495,6 +600,7 @@ fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU32;
 
     #[test]
     fn a_token_is_minted_once_and_then_reused() {
@@ -602,6 +708,214 @@ mod tests {
         assert!(
             server::bind_unix(&path).is_err(),
             "taking over a live socket would silently steal its clients"
+        );
+    }
+
+    struct ScriptedSession {
+        loss: Mutex<Option<SessionLoss>>,
+        outcomes: Mutex<std::collections::VecDeque<soulseek_rs::Result<bool>>>,
+        attempts: AtomicU32,
+    }
+
+    impl ScriptedSession {
+        fn with(
+            outcomes: impl IntoIterator<Item = soulseek_rs::Result<bool>>,
+        ) -> Self {
+            Self {
+                loss: Mutex::new(Some(SessionLoss::Disconnected)),
+                outcomes: Mutex::new(outcomes.into_iter().collect()),
+                attempts: AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl ReconnectSession for ScriptedSession {
+        fn is_owned(&self) -> bool {
+            true
+        }
+        fn loss(&self) -> Option<SessionLoss> {
+            *self.loss.lock().expect("session loss")
+        }
+        fn relogin(&self) -> soulseek_rs::Result<bool> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            let outcome = self
+                .outcomes
+                .lock()
+                .expect("script")
+                .pop_front()
+                .unwrap_or(Ok(true));
+            if matches!(outcome, Ok(true)) {
+                *self.loss.lock().expect("loss") = None;
+            }
+            outcome
+        }
+    }
+
+    /// A stub clock never sleeps, so a test cannot spend wall time waiting.
+    /// It also stops a test whose script would otherwise keep it alive.
+    const MAX_SCRIPTED_WAITS: usize = 64;
+
+    #[derive(Default)]
+    struct ScriptedTimings {
+        waits: Mutex<Vec<Duration>>,
+    }
+
+    impl ReconnectTimings for ScriptedTimings {
+        fn poll(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn wait(&self, duration: Duration, stop: &AtomicBool) -> bool {
+            let mut waits = self.waits.lock().expect("waits");
+            if !duration.is_zero() {
+                waits.push(duration);
+            }
+            if waits.len() >= MAX_SCRIPTED_WAITS {
+                stop.store(true, Ordering::Relaxed);
+                return false;
+            }
+            drop(waits);
+            !stop.load(Ordering::Relaxed)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingReporter {
+        status: Mutex<Vec<String>>,
+        warnings: Mutex<Vec<String>>,
+    }
+
+    impl ReconnectReporter for RecordingReporter {
+        fn status(&self, message: &str) {
+            self.status.lock().expect("status").push(message.to_string());
+        }
+        fn warn(&self, message: &str) {
+            self.warnings.lock().expect("warnings").push(message.to_string());
+        }
+    }
+
+    #[test]
+    fn an_outage_past_the_old_budget_recovers_without_a_restart() {
+        let outage = (0..13)
+            .map(|_| Err(soulseek_rs::SoulseekRs::NotConnected))
+            .chain(std::iter::once(Ok(true)));
+        let session = ScriptedSession::with(outage);
+        let timings = ScriptedTimings::default();
+        let reporter = RecordingReporter::default();
+        let stop = AtomicBool::new(false);
+        let rejoined = AtomicU32::new(0);
+
+        reconnect(
+            &session,
+            "server.test:2416",
+            &stop,
+            &timings,
+            &reporter,
+            || {
+                rejoined.fetch_add(1, Ordering::Relaxed);
+                stop.store(true, Ordering::Relaxed);
+            },
+        );
+
+        assert_eq!(session.attempts.load(Ordering::Relaxed), 14);
+        assert_eq!(rejoined.load(Ordering::Relaxed), 1, "rooms come back");
+        assert!(
+            timings
+                .waits
+                .lock()
+                .expect("waits")
+                .contains(&SLOW_RETRY_INTERVAL),
+            "long outages fall back to the slow interval"
+        );
+        let status = reporter.status.lock().expect("status");
+        assert!(status.iter().any(|m| m.contains("dropped")));
+        assert!(status.iter().any(|m| m.contains("retrying every 60s")));
+        assert!(status.iter().any(|m| m.contains("logged back in")));
+        let warnings = reporter.warnings.lock().expect("warnings");
+        assert!(warnings.iter().any(|m| m.contains("slow retries")));
+        assert!(
+            !warnings.iter().any(|m| m.contains("giving up")),
+            "a transport failure is not a reason to stop forever"
+        );
+    }
+
+    #[test]
+    fn rejected_credentials_are_not_retried() {
+        let session = ScriptedSession::with([
+            Ok(false),
+            Ok(true),
+        ]);
+        let reporter = RecordingReporter::default();
+        reconnect(
+            &session,
+            "server.test:2416",
+            &AtomicBool::new(false),
+            &ScriptedTimings::default(),
+            &reporter,
+            || {},
+        );
+        assert_eq!(session.attempts.load(Ordering::Relaxed), 1);
+        let warnings = reporter.warnings.lock().expect("warnings");
+        assert!(warnings.iter().any(|m| m.contains("rejected the login")));
+        assert_eq!(warnings.len(), 1, "no login fight with a bad password");
+    }
+
+    #[test]
+    fn a_displaced_session_is_not_retried() {
+        let session = ScriptedSession::with([Ok(true)]);
+        *session.loss.lock().expect("loss") = Some(SessionLoss::Displaced);
+        let reporter = RecordingReporter::default();
+        reconnect(
+            &session,
+            "server.test:2416",
+            &AtomicBool::new(false),
+            &ScriptedTimings::default(),
+            &reporter,
+            || {},
+        );
+        assert_eq!(
+            session.attempts.load(Ordering::Relaxed),
+            0,
+            "reconnecting a displaced name starts a login war"
+        );
+        let warnings = reporter.warnings.lock().expect("warnings");
+        assert!(warnings.iter().any(|m| m.contains("displaced")));
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_borrowed_session_is_never_reconnected() {
+        struct Borrowed(ScriptedSession);
+        impl ReconnectSession for Borrowed {
+            fn is_owned(&self) -> bool {
+                false
+            }
+            fn loss(&self) -> Option<SessionLoss> {
+                self.0.loss()
+            }
+            fn relogin(&self) -> soulseek_rs::Result<bool> {
+                self.0.relogin()
+            }
+        }
+        let session = Borrowed(ScriptedSession::with([Ok(true)]));
+        reconnect(
+            &session,
+            "server.test:2416",
+            &AtomicBool::new(false),
+            &ScriptedTimings::default(),
+            &RecordingReporter::default(),
+            || {},
+        );
+        assert_eq!(session.0.attempts.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn waiting_stops_promptly_when_the_daemon_is_told_to() {
+        let stop = AtomicBool::new(true);
+        let start = Instant::now();
+        assert!(!wait_or_stop(Duration::from_secs(60), &stop));
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "the 60s retry sleep must not delay a stop"
         );
     }
 }

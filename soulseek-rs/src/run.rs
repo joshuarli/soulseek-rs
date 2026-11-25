@@ -94,10 +94,31 @@ fn dispatch(mut cli: Cli, out: &Out) -> CliResult {
             .map_err(|e| CliError::usage(e.to_string()))?,
         None => crate::persist::config::FileConfig::default(),
     };
+    let command = cli.command.take();
+    // Commands that only read config or control an existing daemon are how a
+    // user finds and repairs a listener/mapping conflict. They open no local
+    // session, so network validation must not stand between them and the
+    // config file. A setter may therefore leave a conflicting intermediate
+    // state; the next run that opens a session rejects it until repaired.
+    if let Some(repair) = command
+        .as_ref()
+        .filter(|command| is_repair_command(command))
+    {
+        let resolved = resolve_without_network_validation(&cli, &file_config)?;
+        return dispatch_repair(
+            &cli,
+            repair,
+            out,
+            &file_config,
+            config_path,
+            &resolved,
+        );
+    }
+
     let resolved = crate::persist::config::resolve(&cli, &file_config)
         .map_err(CliError::usage)?;
 
-    let Some(command) = cli.command.take() else {
+    let Some(command) = command else {
         // Without a terminal the TUI would panic on its first draw. A script
         // that reached this point wanted a subcommand, so say that instead of
         // crashing.
@@ -130,56 +151,6 @@ fn dispatch(mut cli: Cli, out: &Out) -> CliResult {
         Commands::Skills(ref command) => {
             return crate::commands::skills::run(out, command);
         }
-        // Forgetting a password needs no session — least of all the one it is
-        // about to make unusable.
-        Commands::Account(crate::cli::AccountCommand::Logout) => {
-            return crate::commands::account::logout(
-                out,
-                resolved.username.as_deref(),
-            );
-        }
-        Commands::Config(ConfigCommand::Path) => {
-            return crate::commands::settings::config_path(out, &store);
-        }
-        Commands::Config(ConfigCommand::List) => {
-            crate::commands::settings::config_list(out, &store);
-            return Ok(());
-        }
-        Commands::Config(ConfigCommand::Get { ref key }) => {
-            return crate::commands::settings::config_get(out, &store, key);
-        }
-        Commands::Config(ConfigCommand::Set { ref key, ref value }) => {
-            return crate::commands::settings::config_set(
-                out,
-                &store,
-                key,
-                value,
-                || live_daemon(&cli, &resolved),
-            );
-        }
-        Commands::Shares(SharesCommand::List) => {
-            return crate::commands::settings::shares_list(
-                out,
-                &store,
-                &resolved.shared_dirs,
-            );
-        }
-        Commands::Shares(SharesCommand::Add { ref directory }) => {
-            return crate::commands::settings::shares_add(
-                out,
-                &store,
-                directory,
-                &live_daemon(&cli, &resolved),
-            );
-        }
-        Commands::Shares(SharesCommand::Remove { ref directory }) => {
-            return crate::commands::settings::shares_remove(
-                out,
-                &store,
-                directory,
-                &live_daemon(&cli, &resolved),
-            );
-        }
         Commands::Wish(WishCommand::Add { ref query }) => {
             return crate::commands::wish::add(out, &store, query);
         }
@@ -188,27 +159,6 @@ fn dispatch(mut cli: Cli, out: &Out) -> CliResult {
         }
         Commands::Wish(WishCommand::List) => {
             return crate::commands::wish::list(out, &store);
-        }
-        // Controlling a daemon needs no account of our own: the daemon is
-        // already logged in, and demanding credentials a script never had
-        // would turn "is it running?" into a configuration error.
-        Commands::Daemon(crate::cli::DaemonArgs {
-            command: Some(ref command),
-            ..
-        }) => {
-            let endpoint = daemon_endpoint(&cli, &resolved);
-            let token = resolved.daemon_token;
-            return match command {
-                DaemonCommand::Token => crate::commands::daemon::token(out),
-                DaemonCommand::Status => crate::commands::daemon::status(
-                    out,
-                    endpoint.as_ref(),
-                    token,
-                ),
-                DaemonCommand::Stop => {
-                    crate::commands::daemon::stop(out, endpoint.as_ref(), token)
-                }
-            };
         }
         _ => {}
     }
@@ -246,6 +196,145 @@ fn dispatch(mut cli: Cli, out: &Out) -> CliResult {
             crate::commands::peer::serve(&ctx, args, sweeper)
         }
         other => crate::commands::run(&ctx, other),
+    }
+}
+
+/// Commands that must work even when the config cannot open a session: they
+/// read or repair that config, or talk to a daemon that is already running.
+const fn is_repair_command(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Config(_)
+            | Commands::Shares(
+                SharesCommand::List
+                    | SharesCommand::Add { .. }
+                    | SharesCommand::Remove { .. }
+            )
+            | Commands::Daemon(crate::cli::DaemonArgs {
+                command: Some(_),
+                ..
+            })
+            | Commands::Account(crate::cli::AccountCommand::Logout)
+    )
+}
+
+/// Layer CLI/env over the config file without validating the network settings.
+///
+/// Only the listener/mapping pair can conflict at this point, and none of the
+/// commands using this resolution opens a listener or maps a port. Forcing
+/// that pair to a legal combination leaves every field they do use — daemon
+/// address and token, shared folders, username — layered exactly as usual.
+fn resolve_without_network_validation(
+    cli: &Cli,
+    file: &crate::persist::config::FileConfig,
+) -> CliResult<crate::persist::config::Resolved> {
+    let lenient = Cli {
+        command: None,
+        username: cli.username.clone(),
+        password: cli.password.clone(),
+        password_stdin: cli.password_stdin,
+        password_cmd: cli.password_cmd.clone(),
+        server: cli.server.clone(),
+        no_listener: false,
+        listener: true,
+        listener_port: cli.listener_port,
+        port_mapping: Some("off".to_string()),
+        download_dir: cli.download_dir.clone(),
+        shared_dir: cli.shared_dir.clone(),
+        max_concurrent_downloads: cli.max_concurrent_downloads,
+        search_timeout: cli.search_timeout,
+        daemon: cli.daemon.clone(),
+        daemon_token: cli.daemon_token.clone(),
+        no_daemon: cli.no_daemon,
+        config: cli.config.clone(),
+        no_config: cli.no_config,
+        json: cli.json,
+        quiet: cli.quiet,
+        verbose: cli.verbose,
+        log_file: cli.log_file.clone(),
+    };
+    crate::persist::config::resolve(&lenient, file).map_err(CliError::usage)
+}
+
+/// Dispatch a config/control command using the lenient resolution.
+fn dispatch_repair(
+    cli: &Cli,
+    command: &Commands,
+    out: &Out,
+    file_config: &crate::persist::config::FileConfig,
+    config_path: Option<PathBuf>,
+    resolved: &crate::persist::config::Resolved,
+) -> CliResult {
+    let store = crate::commands::settings::Store {
+        path: config_path,
+        config: file_config.clone(),
+    };
+    match command {
+        // Forgetting a password needs no session — least of all the one it is
+        // about to make unusable.
+        Commands::Account(crate::cli::AccountCommand::Logout) => {
+            crate::commands::account::logout(out, resolved.username.as_deref())
+        }
+        Commands::Config(ConfigCommand::Path) => {
+            crate::commands::settings::config_path(out, &store)
+        }
+        Commands::Config(ConfigCommand::List) => {
+            crate::commands::settings::config_list(out, &store);
+            Ok(())
+        }
+        Commands::Config(ConfigCommand::Get { key }) => {
+            crate::commands::settings::config_get(out, &store, key)
+        }
+        Commands::Config(ConfigCommand::Set { key, value }) => {
+            crate::commands::settings::config_set(out, &store, key, value, || {
+                live_daemon(cli, resolved)
+            })
+        }
+        Commands::Shares(SharesCommand::List) => {
+            crate::commands::settings::shares_list(
+                out,
+                &store,
+                &resolved.shared_dirs,
+            )
+        }
+        Commands::Shares(SharesCommand::Add { directory }) => {
+            crate::commands::settings::shares_add(
+                out,
+                &store,
+                directory,
+                &live_daemon(cli, resolved),
+            )
+        }
+        Commands::Shares(SharesCommand::Remove { directory }) => {
+            crate::commands::settings::shares_remove(
+                out,
+                &store,
+                directory,
+                &live_daemon(cli, resolved),
+            )
+        }
+        // Controlling a daemon needs no account of our own: the daemon is
+        // already logged in, and demanding credentials a script never had
+        // would turn "is it running?" into a configuration error.
+        Commands::Daemon(crate::cli::DaemonArgs {
+            command: Some(command),
+            ..
+        }) => {
+            let endpoint = daemon_endpoint(cli, resolved);
+            let token = resolved.daemon_token.clone();
+            match command {
+                DaemonCommand::Token => crate::commands::daemon::token(out),
+                DaemonCommand::Status => crate::commands::daemon::status(
+                    out,
+                    endpoint.as_ref(),
+                    token,
+                ),
+                DaemonCommand::Stop => {
+                    crate::commands::daemon::stop(out, endpoint.as_ref(), token)
+                }
+            }
+        }
+        _ => unreachable!("only repair commands are dispatched here"),
     }
 }
 
@@ -288,6 +377,20 @@ fn context(
     let (host, port) =
         parse_server_address(&resolved.server).map_err(CliError::usage)?;
 
+    // Attaching borrows the daemon's shares and its filesystem; preparing
+    // folders here would create roots on this machine for a session we never
+    // open. Local sessions prepare their download folder up front so a fresh
+    // default share is actually there when the session scans it.
+    let shared_directories = if daemon.is_some() {
+        Vec::new()
+    } else {
+        crate::directories::prepare_local_session(
+            &resolved.download_dir,
+            &resolved.shared_dirs,
+            |message| out.warn(message),
+        )
+    };
+
     // A daemon has its own server and its own filesystem. Asking it once, up
     // front, is what keeps every command that reports a path or a server
     // honest — `whoami` naming the right server, `download` naming the file
@@ -317,7 +420,7 @@ fn context(
             server_address,
             enable_listen: !resolved.disable_listener,
             listen_port: resolved.listener_port,
-            shared_directories: shared_directories(resolved, out),
+            shared_directories,
             accept_children: resolved.accept_children,
             version: ClientVersion::REFERENCE_CLIENT,
         },
@@ -419,23 +522,6 @@ pub fn missing_username() -> CliError {
     )
 }
 
-/// Validate the configured shares. A bad entry is a warning, not a failure:
-/// the client simply shares less.
-fn shared_directories(
-    resolved: &crate::persist::config::Resolved,
-    out: &Out,
-) -> Vec<String> {
-    let mut valid = Vec::new();
-    for dir in &resolved.shared_dirs {
-        match crate::directories::resolve_shared_directory(Some(dir)) {
-            Ok(Some(path)) => valid.push(path.display().to_string()),
-            Ok(None) => {}
-            Err(e) => out.warn(&format!("ignoring shared directory: {e}")),
-        }
-    }
-    valid
-}
-
 /// Decide how much this run says on stderr.
 ///
 /// `-v` raises the level; without it, an explicit `LOG_LEVEL`/`RUST_LOG` from
@@ -485,17 +571,11 @@ fn run_default_tui(
     let (server_host, server_port) =
         parse_server_address(&resolved.server).map_err(CliError::usage)?;
 
-    // Make sure the download folder exists up front: first-run defaults point
-    // download and shared at the same fresh ~/Sync/M/Soulseek folder, and
-    // shared-directory validation requires an existing path.
-    if let Err(e) = std::fs::create_dir_all(&resolved.download_dir) {
-        out.warn(&format!(
-            "could not create download directory {}: {e}",
-            resolved.download_dir
-        ));
-    }
-
-    let shared_directories = shared_directories(resolved, &out);
+    let shared_directories = crate::directories::prepare_local_session(
+        &resolved.download_dir,
+        &resolved.shared_dirs,
+        |message| out.warn(message),
+    );
     let secret_store = crate::persist::secret::FileStore::default();
     let mut initial_password = password(cli, resolved)?;
 
@@ -741,5 +821,293 @@ fn raise_open_file_limit() -> std::io::Result<u64> {
             }
         }
         Ok(previous)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::Exit;
+    use crate::persist::config::{FileConfig, Resolved};
+
+    fn parsed(args: &[&str]) -> Cli {
+        match crate::cli::parse(args.iter().map(ToString::to_string))
+            .expect("valid arguments")
+        {
+            Invocation::Run(cli) => *cli,
+            _ => panic!("expected a run invocation"),
+        }
+    }
+
+    fn write_config(dir: &Path, config: &FileConfig) -> PathBuf {
+        let path = dir.join("config.toml");
+        config.save(&path).expect("save the config");
+        path
+    }
+
+    fn load_resolved(cli: &Cli, path: &Path) -> Resolved {
+        let file = FileConfig::load(path).expect("load the config");
+        crate::persist::config::resolve(cli, &file).expect("resolve")
+    }
+
+    fn local_cli(path: &Path) -> Cli {
+        parsed(&[
+            "soulseek-rs",
+            "--no-daemon",
+            "--config",
+            path.to_str().unwrap(),
+            "--username",
+            "tester",
+            "--password",
+            "secret",
+        ])
+    }
+
+    #[test]
+    fn a_fresh_config_creates_the_default_share_before_a_session_opens() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let download = dir.path().join("Sync/M/Soulseek");
+        let path = write_config(
+            dir.path(),
+            &FileConfig {
+                download_dir: Some(download.display().to_string()),
+                ..FileConfig::default()
+            },
+        );
+        let cli = local_cli(&path);
+        let resolved = load_resolved(&cli, &path);
+        assert_eq!(
+            resolved.shared_dirs,
+            vec![download.display().to_string()]
+        );
+        assert!(!download.exists(), "the first run starts with no folder");
+
+        let ctx = context(&cli, &resolved, &Out::new(true, true))
+            .expect("a local context");
+        assert!(download.is_dir(), "the download folder must now exist");
+        assert_eq!(
+            ctx.settings.shared_directories,
+            vec![download.display().to_string()],
+            "the default share must survive validation"
+        );
+    }
+
+    #[test]
+    fn an_explicit_sharing_opt_out_stays_empty() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let download = dir.path().join("downloads");
+        let path = write_config(
+            dir.path(),
+            &FileConfig {
+                download_dir: Some(download.display().to_string()),
+                shared_dirs: Some(Vec::new()),
+                ..FileConfig::default()
+            },
+        );
+        let cli = local_cli(&path);
+        let resolved = load_resolved(&cli, &path);
+        assert!(resolved.shared_dirs.is_empty());
+
+        let ctx = context(&cli, &resolved, &Out::new(true, true))
+            .expect("a local context");
+        assert!(download.is_dir(), "downloads still need their folder");
+        assert!(ctx.settings.shared_directories.is_empty());
+    }
+
+    #[test]
+    fn explicit_custom_roots_are_shared_without_creating_new_roots() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let download = dir.path().join("downloads");
+        let custom = dir.path().join("music");
+        std::fs::create_dir_all(&custom).expect("an existing custom root");
+        let missing = dir.path().join("never-created");
+        let path = write_config(
+            dir.path(),
+            &FileConfig {
+                download_dir: Some(download.display().to_string()),
+                shared_dirs: Some(vec![
+                    custom.display().to_string(),
+                    missing.display().to_string(),
+                ]),
+                ..FileConfig::default()
+            },
+        );
+        let cli = local_cli(&path);
+        let resolved = load_resolved(&cli, &path);
+
+        let ctx = context(&cli, &resolved, &Out::new(true, true))
+            .expect("a local context");
+        assert_eq!(
+            ctx.settings.shared_directories,
+            vec![custom.display().to_string()],
+            "only the existing explicit root is shared"
+        );
+        assert!(!missing.exists(), "a missing explicit root is not created");
+    }
+
+    #[test]
+    fn attaching_to_a_daemon_creates_no_local_directories() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let download = dir.path().join("not-created");
+        let socket = dir.path().join("no-daemon.sock");
+        let cli = parsed(&[
+            "soulseek-rs",
+            "--no-config",
+            "--no-listener",
+            "--daemon",
+            socket.to_str().unwrap(),
+        ]);
+        let file = FileConfig {
+            download_dir: Some(download.display().to_string()),
+            ..FileConfig::default()
+        };
+        let resolved = crate::persist::config::resolve(&cli, &file)
+            .expect("a conflicting mapping is not configured");
+        assert_eq!(
+            resolved.shared_dirs,
+            vec![download.display().to_string()]
+        );
+
+        let ctx = context(&cli, &resolved, &Out::new(true, true))
+            .expect("an attached context needs no credentials");
+        assert!(ctx.daemon.is_some(), "this run borrows the daemon");
+        assert!(ctx.settings.shared_directories.is_empty());
+        assert!(!download.exists(), "attaching must not touch local folders");
+    }
+
+    #[test]
+    fn a_conflicting_config_is_inspectable_and_repairable() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let share = dir.path().to_str().unwrap();
+        let path = write_config(
+            dir.path(),
+            &FileConfig {
+                disable_listener: Some(true),
+                port_mapping: Some("auto".to_string()),
+                shared_dirs: Some(vec![share.to_string()]),
+                ..FileConfig::default()
+            },
+        );
+        let bare = parsed(&[
+            "soulseek-rs",
+            "--no-daemon",
+            "--config",
+            path.to_str().unwrap(),
+        ]);
+        assert!(
+            crate::persist::config::resolve(
+                &bare,
+                &FileConfig::load(&path).expect("load")
+            )
+            .is_err(),
+            "the conflict must still stop a session from opening"
+        );
+
+        let out = Out::new(true, true);
+        for args in [
+            vec!["soulseek-rs", "--config", path.to_str().unwrap(), "config", "get", "port_mapping"],
+            vec!["soulseek-rs", "--config", path.to_str().unwrap(), "config", "list"],
+            vec!["soulseek-rs", "--config", path.to_str().unwrap(), "config", "path"],
+            vec!["soulseek-rs", "--config", path.to_str().unwrap(), "shares", "list"],
+        ] {
+            dispatch(parsed(&args), &out)
+                .unwrap_or_else(|e| panic!("{} should work: {e}", args[3..].join(" ")));
+        }
+
+        let socket = dir.path().join("no-daemon.sock");
+        let status = dispatch(
+            parsed(&[
+                "soulseek-rs",
+                "--config",
+                path.to_str().unwrap(),
+                "--daemon",
+                socket.to_str().unwrap(),
+                "daemon",
+                "status",
+            ]),
+            &out,
+        )
+        .expect_err("there is no daemon to ask");
+        assert_eq!(status.exit, Exit::Connection, "not a config error");
+
+        dispatch(
+            parsed(&[
+                "soulseek-rs",
+                "--config",
+                path.to_str().unwrap(),
+                "config",
+                "set",
+                "port_mapping",
+                "off",
+            ]),
+            &out,
+        )
+        .expect("the conflict can be repaired");
+        let fixed = load_resolved(&bare, &path);
+        assert_eq!(fixed.port_mapping, crate::port_mapping::MappingPolicy::Off);
+    }
+
+    #[test]
+    fn a_setter_may_leave_a_repairable_intermediate_state() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = write_config(
+            dir.path(),
+            &FileConfig {
+                port_mapping: Some("auto".to_string()),
+                ..FileConfig::default()
+            },
+        );
+        let bare = parsed(&[
+            "soulseek-rs",
+            "--no-daemon",
+            "--config",
+            path.to_str().unwrap(),
+        ]);
+        assert_ne!(
+            load_resolved(&bare, &path).port_mapping,
+            crate::port_mapping::MappingPolicy::Off
+        );
+        let out = Out::new(true, true);
+
+        let mutate = |key: &str, value: &str| {
+            dispatch(
+                parsed(&[
+                    "soulseek-rs",
+                    "--config",
+                    path.to_str().unwrap(),
+                    "config",
+                    "set",
+                    key,
+                    value,
+                ]),
+                &out,
+            )
+        };
+        mutate("disable_listener", "true").expect("a setter is not blocked");
+        assert!(
+            crate::persist::config::resolve(
+                &bare,
+                &FileConfig::load(&path).expect("load")
+            )
+            .is_err(),
+            "the conflict is a repairable intermediate state"
+        );
+        dispatch(
+            parsed(&[
+                "soulseek-rs",
+                "--config",
+                path.to_str().unwrap(),
+                "config",
+                "get",
+                "disable_listener",
+            ]),
+            &out,
+        )
+        .expect("the conflicting value stays readable");
+        mutate("port_mapping", "off").expect("the setter repairs the conflict");
+        assert_eq!(
+            load_resolved(&bare, &path).port_mapping,
+            crate::port_mapping::MappingPolicy::Off
+        );
     }
 }
