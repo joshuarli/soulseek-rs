@@ -98,22 +98,34 @@ fn has_log_file() -> bool {
     LOG_FILE.lock().is_ok_and(|f| f.is_some())
 }
 
+/// Whether `character` reorders the text around it when a terminal draws it.
+///
+/// The bidi overrides U+202A..U+202E and the isolates U+2066..U+2069 are
+/// format characters, not controls, so `char::is_control` does not catch them.
+/// A file name ending in an override can display a harmless extension while
+/// the real one is something else.
+#[must_use]
+pub const fn is_bidirectional_control(character: char) -> bool {
+    matches!(character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 /// What a terminal may be shown for `character`.
 ///
 /// Text from peers and servers is written to the terminal as it is, so a
 /// control character (ESC, BEL, DEL, the C1 range including the 8-bit CSI)
-/// would be executed rather than shown. Each one is replaced with U+FFFD.
+/// would be executed rather than shown, and a bidi control would reorder the
+/// text around it. Each one is replaced with U+FFFD.
 #[must_use]
 pub fn displayable_char(character: char) -> char {
-    if character.is_control() {
+    if character.is_control() || is_bidirectional_control(character) {
         '\u{FFFD}'
     } else {
         character
     }
 }
 
-/// `message` with every control character replaced as [`displayable_char`]
-/// does, except newline and tab, as a message may span lines.
+/// `message` with every control and bidi character replaced as
+/// [`displayable_char`] does, except newline and tab, as a message may span lines.
 #[must_use]
 pub fn displayable(message: &str) -> String {
     message
@@ -130,8 +142,9 @@ pub fn displayable(message: &str) -> String {
 
 /// The file line and the terminal line for one message. The message can carry
 /// peer-supplied text (upload-denied reasons, file names, user names), and the
-/// terminal line is written to the real terminal, so control characters in it
-/// are neutralized before they can be executed.
+/// terminal line is written to the real terminal, so control characters and
+/// bidi controls in it are neutralized before they can be executed or reorder
+/// what the user reads.
 fn format_lines(
     timestamp: &str,
     name: &str,
@@ -299,8 +312,9 @@ macro_rules! trace {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUFFER, LogLevel, LogSink, choose_sink, enable_buffering,
-        disable_buffering, format_lines, log, log_level, set_log_level,
+        BUFFER, LogLevel, LogSink, choose_sink, displayable_char,
+        enable_buffering, disable_buffering, format_lines, log, log_level,
+        set_log_level,
     };
 
     /// ESC, OSC, CSI, BEL, DEL and C1 (including the 8-bit CSI) in a peer
@@ -327,6 +341,24 @@ mod tests {
         );
         assert!(plain.contains("denied") && plain.ends_with("end"));
         assert!(plain.contains("\u{FFFD}]0;pwned\u{FFFD}"), "{plain:?}");
+    }
+
+    #[test]
+    fn bidirectional_overrides_cannot_reorder_peer_text() {
+        for codepoint in 0x202A..=0x202E {
+            let character = char::from_u32(codepoint).expect("valid bidi codepoint");
+            assert_eq!(displayable_char(character), '\u{FFFD}');
+        }
+        for codepoint in 0x2066..=0x2069 {
+            let character = char::from_u32(codepoint).expect("valid bidi codepoint");
+            assert_eq!(displayable_char(character), '\u{FFFD}');
+        }
+        let hostile = "song\u{202E}gnp.exe \u{2066}note";
+        let (plain, coloured) = format_lines("t", "INFO", "\x1b[32m", hostile);
+        for line in [&plain, &coloured] {
+            assert!(!line.contains('\u{202E}') && !line.contains('\u{2066}'), "{line:?}");
+            assert!(line.contains("\u{FFFD}gnp.exe"), "{line:?}");
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! and `cut` are first-class consumers.
 
 use deser::Serialize;
+use soulseek_rs::utils::logger::is_bidirectional_control;
 use std::io::{IsTerminal, Write};
 
 /// Documented exit statuses. Anything a wrapper script needs to branch on has
@@ -106,11 +107,19 @@ pub trait Record: Serialize {
 /// One record then always occupies exactly one line with stable columns.
 /// Every other control character (ESC, BEL, DEL, the C1 range with the 8-bit
 /// CSI) goes too, because a terminal that shows the record would execute it.
+/// Bidi overrides and isolates go as well: they are not controls, but they can
+/// display a file's real extension as something harmless.
 #[must_use]
 pub fn sanitize(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || is_bidirectional_control(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -672,6 +681,25 @@ mod tests {
         let clean = sanitize(hostile);
         assert_eq!(clean, "bob ]0;pwned  [2J 31m .mp3");
         assert!(!clean.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn sanitize_removes_bidirectional_overrides_from_records() {
+        assert_eq!(sanitize("song\u{202E}gnp.exe"), "song gnp.exe");
+        assert_eq!(sanitize("\u{2066}note\u{2069}"), " note ");
+        assert!(!sanitize("a\u{202A}b").contains('\u{202A}'));
+    }
+
+    #[test]
+    fn a_bidirectional_override_in_a_peer_path_cannot_reorder_a_text_record() {
+        let record = SearchRecord {
+            path: "music\\song\u{202E}gnp.exe".into(),
+            ..search_record()
+        };
+        let text = record.text();
+        assert!(text.contains("song gnp.exe"), "{text:?}");
+        assert!(!text.contains('\u{202E}'), "{text:?}");
+        assert_eq!(text.split('\t').count(), 4);
     }
 
     #[test]

@@ -264,6 +264,24 @@ mod tests {
     }
 
     #[test]
+    fn bidirectional_overrides_cannot_reorder_what_is_drawn() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 1));
+        buffer.set_stringn(
+            0,
+            0,
+            "song\u{202E}gnp.exe \u{2066}note\u{2069}",
+            40,
+            Style::default(),
+        );
+        let drawn = symbols(&buffer);
+        assert!(!drawn.contains('\u{202E}') && !drawn.contains('\u{2066}'), "{drawn:?}");
+        assert!(
+            drawn.starts_with("song\u{FFFD}gnp.exe \u{FFFD}note\u{FFFD}"),
+            "{drawn:?}"
+        );
+    }
+
+    #[test]
     fn ordinary_text_is_unchanged() {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 1));
         buffer.set_stringn(0, 0, "Müller – 日本語 🦀", 20, Style::default());
