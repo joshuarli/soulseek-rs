@@ -7,13 +7,22 @@ use crate::message::Message;
 // arbitrary-sized chunks, so we accumulate into a buffer and only emit a Message
 // once size + 4 bytes are available.
 
-/// A malformed length prefix must not make a peer grow our buffer without
-/// bound. Real protocol frames are far smaller; this leaves generous headroom
-/// for a large share list while keeping a stalled or hostile peer finite.
-pub const MAX_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
+/// Size of the length prefix that travels with every frame.
+pub const LENGTH_PREFIX_BYTES: usize = 4;
+
+/// Largest payload we accept from a peer. Real protocol frames are far smaller;
+/// this leaves generous headroom for a large share list while keeping a stalled
+/// or hostile peer finite.
+pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Buffer budget for a single frame: its payload plus the length prefix.
+pub const MAX_BUFFERED_BYTES: usize =
+    MAX_PAYLOAD_BYTES.saturating_add(LENGTH_PREFIX_BYTES);
 
 pub struct MessageReader {
     buffer: VecDeque<u8>,
+    max_payload_bytes: usize,
+    max_buffered_bytes: usize,
 }
 
 impl Default for MessageReader {
@@ -27,6 +36,19 @@ impl MessageReader {
     pub const fn new() -> Self {
         Self {
             buffer: VecDeque::new(),
+            max_payload_bytes: MAX_PAYLOAD_BYTES,
+            max_buffered_bytes: MAX_BUFFERED_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub const fn new_with_payload_limit(max_payload_bytes: usize) -> Self {
+        Self {
+            buffer: VecDeque::new(),
+            max_payload_bytes,
+            max_buffered_bytes: max_payload_bytes
+                .saturating_add(LENGTH_PREFIX_BYTES),
         }
     }
 
@@ -35,6 +57,8 @@ impl MessageReader {
     pub fn new_with_buffer(buffer: Vec<u8>) -> Self {
         Self {
             buffer: buffer.into(),
+            max_payload_bytes: MAX_PAYLOAD_BYTES,
+            max_buffered_bytes: MAX_BUFFERED_BYTES,
         }
     }
 
@@ -58,10 +82,15 @@ impl MessageReader {
     }
 
     fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.buffer.len().saturating_add(bytes.len()) > MAX_BUFFERED_BYTES {
+        let max_buffered = self.max_buffered_bytes;
+        if self.buffer.len().saturating_add(bytes.len()) > max_buffered {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("peer exceeded the {MAX_BUFFERED_BYTES}-byte frame buffer"),
+                format!(
+                    "peer exceeded the {max_buffered}-byte frame buffer \
+                     (payload limit {} plus {LENGTH_PREFIX_BYTES}-byte header)",
+                    self.max_payload_bytes
+                ),
             ));
         }
         self.buffer.extend(bytes);
@@ -79,7 +108,7 @@ impl MessageReader {
 
     pub fn extract_message(&mut self) -> io::Result<Option<Message>> {
         let bytes_read = self.buffer.len();
-        if bytes_read < 4 {
+        if bytes_read < LENGTH_PREFIX_BYTES {
             return Ok(None);
         }
 
@@ -90,16 +119,17 @@ impl MessageReader {
             self.buffer[3],
         ]) as usize;
 
-        if message_size > MAX_BUFFERED_BYTES {
+        if message_size > self.max_payload_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "peer announced a {message_size}-byte frame, above the \
-                     {MAX_BUFFERED_BYTES}-byte limit"
+                     {}-byte payload limit",
+                    self.max_payload_bytes
                 ),
             ));
         }
-        let total_size = message_size + 4;
+        let total_size = message_size + LENGTH_PREFIX_BYTES;
 
         if bytes_read < total_size {
             return Ok(None);
@@ -112,8 +142,31 @@ impl MessageReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::message::MessageReader;
-    use super::MAX_BUFFERED_BYTES;
+    use super::{
+        LENGTH_PREFIX_BYTES, MAX_BUFFERED_BYTES, MAX_PAYLOAD_BYTES,
+        MessageReader,
+    };
+    use std::io::{ErrorKind, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const TEST_LIMIT: usize = 32;
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ours = TcpStream::connect(addr).unwrap();
+        ours.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (theirs, _) = listener.accept().unwrap();
+        theirs.set_nodelay(true).unwrap();
+        (ours, theirs)
+    }
+
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut bytes = (payload.len() as u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(payload);
+        bytes
+    }
 
     #[test]
     fn test_extract_message() {
@@ -196,5 +249,140 @@ mod tests {
             .read_from_socket(&mut ours)
             .expect_err("a closed connection is not a successful read");
         assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn production_caps_leave_room_for_the_length_prefix() {
+        assert_eq!(
+            MAX_BUFFERED_BYTES,
+            MAX_PAYLOAD_BYTES + LENGTH_PREFIX_BYTES
+        );
+        assert_eq!(MessageReader::new().max_buffered_bytes, MAX_BUFFERED_BYTES);
+    }
+
+    #[test]
+    fn a_frame_at_the_limit_fits_with_its_header() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        theirs.write_all(&frame(&[0x5a; TEST_LIMIT])).unwrap();
+
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.buffer_len(), TEST_LIMIT + LENGTH_PREFIX_BYTES);
+        let message = reader.extract_message().unwrap().unwrap();
+        assert_eq!(message.get_data(), frame(&[0x5a; TEST_LIMIT]));
+        assert_eq!(reader.buffer_len(), 0);
+    }
+
+    #[test]
+    fn one_byte_beyond_the_payload_limit_is_rejected_from_the_header_alone() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        theirs.write_all(&((TEST_LIMIT + 1) as u32).to_le_bytes()).unwrap();
+
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.buffer_len(), LENGTH_PREFIX_BYTES);
+        let error = reader.extract_message().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(reader.buffer_len(), LENGTH_PREFIX_BYTES);
+    }
+
+    #[test]
+    fn one_byte_beyond_the_buffered_limit_is_rejected_by_append() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        theirs.write_all(&[0x7f; TEST_LIMIT + 5]).unwrap();
+
+        let error = reader.read_from_socket(&mut ours).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(reader.buffer_len(), 0);
+    }
+
+    #[test]
+    fn a_fragmented_header_and_payload_emit_only_the_complete_frame() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        let bytes = frame(b"hello world");
+
+        theirs.write_all(&bytes[..2]).unwrap();
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.buffer_len(), 2);
+        assert!(reader.extract_message().unwrap().is_none());
+
+        theirs.write_all(&bytes[2..6]).unwrap();
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.buffer_len(), 6);
+        assert!(reader.extract_message().unwrap().is_none());
+
+        theirs.write_all(&bytes[6..]).unwrap();
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.buffer_len(), bytes.len());
+        let message = reader.extract_message().unwrap().unwrap();
+        assert_eq!(message.get_data(), bytes);
+        assert_eq!(reader.buffer_len(), 0);
+    }
+
+    #[test]
+    fn coalesced_frames_are_extracted_in_order() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        let frames = [frame(b"one"), frame(b"two"), frame(b"three")];
+        let wire: Vec<u8> = frames.iter().flatten().copied().collect();
+        theirs.write_all(&wire).unwrap();
+
+        reader.read_from_socket(&mut ours).unwrap();
+        for expected in &frames {
+            let message = reader.extract_message().unwrap().unwrap();
+            assert_eq!(message.get_data(), *expected);
+        }
+        assert!(reader.extract_message().unwrap().is_none());
+        assert_eq!(reader.buffer_len(), 0);
+    }
+
+    #[test]
+    fn a_near_limit_frame_then_another_frame_are_both_emitted() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        let near_limit = frame(&[0x11; TEST_LIMIT - 2]);
+        let small = frame(b"tail");
+
+        theirs.write_all(&near_limit).unwrap();
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.extract_message().unwrap().unwrap().get_data(), near_limit);
+        assert_eq!(reader.buffer_len(), 0);
+
+        theirs.write_all(&small).unwrap();
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.extract_message().unwrap().unwrap().get_data(), small);
+        assert_eq!(reader.buffer_len(), 0);
+    }
+
+    #[test]
+    fn a_slow_incomplete_frame_emits_nothing() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        let mut bytes = (20u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(b"partial");
+
+        theirs.write_all(&bytes).unwrap();
+        reader.read_from_socket(&mut ours).unwrap();
+        assert_eq!(reader.buffer_len(), bytes.len());
+        assert!(reader.extract_message().unwrap().is_none());
+        assert_eq!(reader.buffer_len(), bytes.len());
+    }
+
+    #[test]
+    fn eof_after_a_complete_frame_leaves_the_frame_buffered() {
+        let (mut ours, mut theirs) = socket_pair();
+        let mut reader = MessageReader::new_with_payload_limit(TEST_LIMIT);
+        let bytes = frame(b"reply");
+        theirs.write_all(&bytes).unwrap();
+        drop(theirs);
+
+        reader.read_from_socket(&mut ours).unwrap();
+        let error = reader.read_from_socket(&mut ours).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
+        let message = reader.extract_message().unwrap().unwrap();
+        assert_eq!(message.get_data(), bytes);
+        assert_eq!(reader.buffer_len(), 0);
     }
 }
