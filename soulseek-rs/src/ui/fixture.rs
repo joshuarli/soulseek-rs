@@ -17,7 +17,7 @@ use soulseek_rs::{
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct FixtureSession {    pub history: Vec<ChatMessageDto>,
@@ -38,8 +38,14 @@ pub struct FixtureSession {    pub history: Vec<ChatMessageDto>,
     pub download_removed: Mutex<Vec<(String, String)>>,
     pub room_events: Mutex<Vec<RoomEvent>>,
     pub browsed: Mutex<HashMap<String, Vec<SharedDirectory>>>,
+    pub browse_requested: Mutex<HashMap<String, Instant>>,
     pub shared_dirs: Vec<String>,
 }
+
+/// The PTY snapshot captures the loading state of a browse tab. A local
+/// fixture would otherwise answer before the frame is taken on a warm host;
+/// holding the reply briefly makes that boundary independent of machine speed.
+const BROWSE_REPLY_DELAY: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 pub use FixtureSession as TalkativeSession;
@@ -530,6 +536,10 @@ impl SessionApi for FixtureSession {
         Vec::new()
     }
     fn browse_user(&self, username: &str) -> soulseek_rs::Result<()> {
+        self.browse_requested
+            .lock()
+            .expect("not poisoned")
+            .insert(username.to_string(), Instant::now());
         if !self
             .browsed
             .lock()
@@ -544,6 +554,15 @@ impl SessionApi for FixtureSession {
         Ok(())
     }
     fn take_browse_result(&self, username: &str) -> Option<Vec<SharedDirectory>> {
+        let requested = self
+            .browse_requested
+            .lock()
+            .expect("not poisoned")
+            .get(username)
+            .copied();
+        if requested.is_none_or(|at| at.elapsed() < BROWSE_REPLY_DELAY) {
+            return None;
+        }
         self.browsed
             .lock()
             .expect("not poisoned")
