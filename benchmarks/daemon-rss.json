@@ -1,21 +1,35 @@
 {
-  "revision": "7802ab24b70bcb45270aa72134ccae52fe00ba4e",
+  "revision": "b574c02ba612cb4b5d64cf772f3df9a0f85fd07e",
+  "executed": {
+    "binary": "/Users/josh/repos/soulseek-rs/target/debug/soulseek-rs",
+    "sha256": "7e5607b40f966bd8479c4ff40327a78ecf72d427bef307477d5713887f933de4",
+    "version": "soulseek-rs 19.1.0 (git 9a09d7d07065)",
+    "build_profile": "debug",
+    "environment": {
+      "system": "Darwin",
+      "release": "27.2.0",
+      "machine": "arm64",
+      "python": "3.15.1"
+    }
+  },
   "load": {
     "rounds": 8,
+    "operations_succeeded": 32,
+    "operations_required": 32,
     "operations_per_round": [
       "search",
       "browse",
       "download",
       "upload"
     ],
-    "seeds": 1,
-    "share_bytes": 30,
-    "server_port": 50525
+    "distinct_fixture_bytes": 30,
+    "verified_in_both_directions": true,
+    "server_port": 56351
   },
   "observed": {
-    "peak_rss_kib": 9840,
-    "peak_threads": 11,
-    "sample_count": 144
+    "peak_rss_kib": 11712,
+    "peak_threads": 18,
+    "sample_count": 1542
   },
   "boundaries": "One measured daemon plus one seeder and soulfind on one host. RSS and thread count are sampled from the daemon process only, every 100 ms. This measures lifecycle and mixed-load growth, not an idle-daemon baseline or a saturation ceiling. Actor mailboxes and the client operation channel remain unbounded, so no global memory budget is claimed."
 }

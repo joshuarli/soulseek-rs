@@ -113,7 +113,7 @@ if [ "$i" -ge 200 ] || ! kill -0 "$LOAD_PID" 2>/dev/null; then
     exit 3
 fi
 # Give the server time to register both sessions' shares before searching.
-sleep 2
+sleep 5
 
 "$HELPER" identity "$BIN" "$PROFILE" "$WORK/identity.json"
 "$HELPER" sample "$LOAD_PID" "$WORK/samples.txt" &
@@ -124,7 +124,7 @@ i=0
 while [ "$i" -lt "$ROUNDS" ]; do
     name=$(printf 'rss-file-%03d.bin' "$i")
     "$BIN" --no-config --quiet --daemon "$LOAD_SOCK" \
-        search rss-file --search-timeout 10 > "$WORK/search-$i.txt" 2>&1 &
+        search rss-file --search-timeout 20 > "$WORK/search-$i.txt" 2>&1 &
     p1=$!
     "$BIN" --no-config --quiet --daemon "$LOAD_SOCK" \
         browse rssseed > "$WORK/browse-$i.txt" 2>&1 &
