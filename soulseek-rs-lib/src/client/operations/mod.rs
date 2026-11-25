@@ -179,6 +179,7 @@ impl Client {
                                 port,
                             );
                         }
+                        Self::pump_upload_queue(&client_context);
 
                         let peer_exists = match client_context.read_safe() {
                             Ok(ctx) => ctx

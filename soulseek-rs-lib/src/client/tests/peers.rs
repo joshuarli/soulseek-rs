@@ -1,6 +1,146 @@
 //! Uploads, broker connects, and the peers a disconnect may not drop.
 
 use super::*;
+use std::io::Read;
+
+static TEST_DIR_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+fn captured_peer(
+    username: &str,
+    ops: &mpsc::Sender<ClientOperation>,
+) -> (PeerRegistry, TcpStream) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ours = TcpStream::connect(addr).unwrap();
+    ours.set_nonblocking(true).unwrap();
+    let far_end = listener.accept().unwrap().0;
+    far_end
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    let registry = PeerRegistry::new(
+        Arc::new(ActorSystem::new()),
+        ops.clone(),
+        "me".to_string(),
+    );
+    let peer = Peer::new(
+        username.to_string(),
+        ConnectionType::P,
+        "127.0.0.1".to_string(),
+        u32::from(addr.port()),
+        None,
+        0,
+        0,
+        0,
+    );
+    registry.register_peer(peer, Some(ours), None).unwrap();
+    (registry, far_end)
+}
+
+fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
+    let mut frame = Vec::new();
+    let mut chunk = [0u8; 512];
+    while frame.len() < 4 {
+        let read = stream.read(&mut chunk).expect("read frame length");
+        assert!(read > 0, "the peer closed before sending a frame");
+        frame.extend_from_slice(&chunk[..read]);
+    }
+    let size = u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize;
+    while frame.len() < 4 + size {
+        let read = stream.read(&mut chunk).expect("read frame body");
+        assert!(read > 0, "the peer closed in the middle of a frame");
+        frame.extend_from_slice(&chunk[..read]);
+    }
+    frame
+}
+
+fn assert_no_frame(stream: &mut TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    match stream.read(&mut [0u8; 16]) {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+        other => panic!("the peer should have heard nothing, got {other:?}"),
+    }
+}
+
+fn fence(ops: &mpsc::Sender<ClientOperation>, client: &Client, value: u32) {
+    ops.send(ClientOperation::OwnPrivileges(value)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.own_privilege_seconds() != Some(value) {
+        assert!(Instant::now() < deadline, "ops loop never caught up");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn setup_share(client: &Client, name: &str) -> String {
+    let dir = std::env::temp_dir().join(format!(
+        "soulseek-uploads-{}-{}",
+        std::process::id(),
+        TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(name), b"data").unwrap();
+    let virtual_path =
+        format!("{}\\{name}", dir.file_name().unwrap().to_string_lossy());
+    let shares = crate::shares::Shares::scan(&dir).unwrap();
+    client.context.write().unwrap().shares = Arc::new(shares);
+    virtual_path
+}
+
+fn synthetic() -> Arc<crate::shares::SharedFile> {
+    Arc::new(crate::shares::synthetic_file(std::path::Path::new(
+        "/tmp/x.mp3",
+    )))
+}
+
+fn occupy_slot(ctx: &mut ClientContext, token: u32, downloader: &str) {
+    ctx.upload_slots = 1;
+    ctx.uploads.insert(
+        token,
+        UploadJob {
+            downloader: downloader.to_string(),
+            file: synthetic(),
+            virtual_path: format!("@@share\\{downloader}.mp3"),
+            size: 4096,
+            offered: None,
+        },
+    );
+}
+
+fn add_controlled_serve(
+    ctx: &mut ClientContext,
+    username: &str,
+    token: u32,
+    since: Instant,
+) {
+    ctx.pending_serves
+        .entry(username.to_string())
+        .or_default()
+        .push(PendingServe { token, since });
+}
+
+fn pending_serve_context(token: u32, downloader: &str) -> ClientContext {
+    let mut ctx = ClientContext::new();
+    occupy_slot(&mut ctx, token, downloader);
+    ctx.uploads.get_mut(&token).unwrap().virtual_path =
+        "@@share\\pending.mp3".to_string();
+    ctx
+}
+
+fn failed_events(ctx: &ClientContext) -> Vec<crate::types::UploadInfo> {
+    let mut events = Vec::new();
+    for event in &ctx.upload_events {
+        if matches!(event.status, UploadStatus::Failed(_)) {
+            events.push(event.clone());
+        }
+    }
+    events
+}
 
 #[test]
 fn upload_speed_is_reported_only_while_running() {
@@ -192,4 +332,388 @@ fn the_server_is_told_our_child_capacity_only_when_it_changes() {
         "the first answer is always worth sending"
     );
     assert_eq!(ctx.accept_children_change(), None, "unchanged, so silent");
+}
+
+#[test]
+fn a_full_broker_table_fails_the_upload_without_holding_the_context_lock() {
+    let client = Client::new("u", "p");
+    let (ops, ops_rx) = mpsc::channel();
+    Client::listen_to_client_operations(
+        ops_rx,
+        client.context.clone(),
+        "u".to_string(),
+    );
+
+    let token = 9001;
+    let file = synthetic();
+    {
+        let mut ctx = client.context.write().unwrap();
+        for index in 0..super::super::MAX_BROKERED_UPLOADS {
+            ctx.brokered_uploads.insert(
+                u32::try_from(index).unwrap() + 1,
+                BrokeredUpload {
+                    token: 7000 + u32::try_from(index).unwrap(),
+                    file: Arc::clone(&file),
+                    deadline: Instant::now() + Duration::from_secs(3600),
+                    claimed: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+        occupy_slot(&mut ctx, token, "amy");
+        ctx.enqueue_upload("bob", "next.mp3", Arc::clone(&file), 4096);
+    }
+
+    Client::spawn_serve(
+        &client.context,
+        "u",
+        token,
+        "127.0.0.1".to_string(),
+        0,
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        let status = client
+            .context
+            .read()
+            .unwrap()
+            .active_uploads
+            .get(&token)
+            .map(|upload| upload.status.clone());
+        if matches!(status, Some(UploadStatus::Failed(_))) {
+            break status.unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the brokered-upload cap deadlocked: {status:?}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(
+        status,
+        UploadStatus::Failed("too many brokered uploads".to_string())
+    );
+
+    {
+        let ctx = client.context.read().unwrap();
+        assert!(
+            ctx.upload_queue.is_empty(),
+            "the rejected upload must hand its slot to the next in line"
+        );
+        let offered: Vec<_> =
+            ctx.uploads.values().map(|job| job.downloader.as_str()).collect();
+        assert_eq!(offered, ["bob"], "the next queued upload should be served");
+    }
+
+    fence(&ops, &client, 11);
+    assert!(
+        client.context.try_write().is_ok(),
+        "no context guard should be left held after the rejection"
+    );
+    drop(ops);
+    assert!(
+        client.context.try_read().is_ok(),
+        "shutting the operations loop must not leave a guard behind"
+    );
+}
+
+#[test]
+fn a_full_peer_queue_denies_the_request_and_a_retry_takes_the_freed_place() {
+    let client = Client::new("u", "p");
+    let (ops, ops_rx) = mpsc::channel();
+    Client::listen_to_client_operations(
+        ops_rx,
+        client.context.clone(),
+        "u".to_string(),
+    );
+    let (registry, mut captured) = captured_peer("amy", &ops);
+    let filename = setup_share(&client, "f.mp3");
+    {
+        let mut ctx = client.context.write().unwrap();
+        ctx.peer_registry = Some(registry);
+        occupy_slot(&mut ctx, 1, "busy");
+        for index in 0..super::super::upload_queue::MAX_QUEUED_UPLOADS_PER_PEER {
+            ctx.enqueue_upload(
+                "amy",
+                &format!("old-{index}.mp3"),
+                synthetic(),
+                4096,
+            );
+        }
+    }
+
+    ops.send(ClientOperation::QueueUpload {
+        requester_key: "amy".to_string(),
+        filename: filename.clone(),
+    })
+    .unwrap();
+
+    let frame = read_frame(&mut captured);
+    assert_eq!(&frame[4..8], &50u32.to_le_bytes());
+    let mut message = crate::message::Message::new_with_data(frame);
+    message.set_pointer(8);
+    let sent_filename = message.read_string();
+    let reason = message.read_string();
+    assert_eq!(sent_filename, filename);
+    assert_ne!(reason, "Queued", "Queued means the request was accepted");
+    assert_eq!(reason, "Upload queue full");
+
+    fence(&ops, &client, 11);
+    {
+        let ctx = client.context.read().unwrap();
+        assert_eq!(ctx.upload_queue.len(), super::super::upload_queue::MAX_QUEUED_UPLOADS_PER_PEER);
+        assert!(ctx.place_in_queue("amy", &filename).is_none());
+        assert_eq!(ctx.uploads.len(), 1, "a denied file must not take a slot");
+    }
+
+    client.context.write().unwrap().upload_queue.remove(0);
+    ops.send(ClientOperation::QueueUpload {
+        requester_key: "amy".to_string(),
+        filename: filename.clone(),
+    })
+    .unwrap();
+    fence(&ops, &client, 12);
+    assert_no_frame(&mut captured);
+
+    let ctx = client.context.read().unwrap();
+    assert_eq!(ctx.upload_queue.len(), super::super::upload_queue::MAX_QUEUED_UPLOADS_PER_PEER);
+    assert_eq!(
+        ctx.upload_queue
+            .iter()
+            .filter(|job| job.downloader == "amy" && job.virtual_path == filename)
+            .count(),
+        1,
+        "the retry must take the freed place exactly once"
+    );
+    assert_eq!(ctx.uploads.len(), 1);
+}
+
+#[test]
+fn a_globally_full_queue_denies_a_new_peer_and_recovers_when_a_place_frees() {
+    let client = Client::new("u", "p");
+    let (ops, ops_rx) = mpsc::channel();
+    Client::listen_to_client_operations(
+        ops_rx,
+        client.context.clone(),
+        "u".to_string(),
+    );
+    let (registry, mut captured) = captured_peer("amy", &ops);
+    let filename = setup_share(&client, "global.mp3");
+    {
+        let mut ctx = client.context.write().unwrap();
+        ctx.peer_registry = Some(registry);
+        occupy_slot(&mut ctx, 1, "busy");
+        for index in 0..super::super::upload_queue::MAX_QUEUED_UPLOADS {
+            ctx.enqueue_upload(
+                &format!("peer-{index}"),
+                "f.mp3",
+                synthetic(),
+                4096,
+            );
+        }
+    }
+
+    ops.send(ClientOperation::QueueUpload {
+        requester_key: "amy".to_string(),
+        filename: filename.clone(),
+    })
+    .unwrap();
+    let frame = read_frame(&mut captured);
+    let mut message = crate::message::Message::new_with_data(frame);
+    message.set_pointer(8);
+    assert_eq!(message.read_string(), filename);
+    assert_eq!(message.read_string(), "Upload queue full");
+
+    fence(&ops, &client, 11);
+    {
+        let ctx = client.context.read().unwrap();
+        assert_eq!(ctx.upload_queue.len(), super::super::upload_queue::MAX_QUEUED_UPLOADS);
+        assert!(ctx.place_in_queue("amy", &filename).is_none());
+        assert_eq!(ctx.uploads.len(), 1);
+    }
+
+    client.context.write().unwrap().upload_queue.remove(0);
+    ops.send(ClientOperation::QueueUpload {
+        requester_key: "amy".to_string(),
+        filename: filename.clone(),
+    })
+    .unwrap();
+    fence(&ops, &client, 12);
+    assert_no_frame(&mut captured);
+
+    let ctx = client.context.read().unwrap();
+    assert_eq!(ctx.upload_queue.len(), super::super::upload_queue::MAX_QUEUED_UPLOADS);
+    assert_eq!(
+        ctx.upload_queue
+            .iter()
+            .filter(|job| job.downloader == "amy" && job.virtual_path == filename)
+            .count(),
+        1
+    );
+    assert_eq!(ctx.uploads.len(), 1);
+}
+
+#[test]
+fn an_address_before_expiry_keeps_the_job_and_frees_the_next_one() {
+    let mut ctx = pending_serve_context(1, "amy");
+    ctx.enqueue_upload("bob", "next.mp3", synthetic(), 4096);
+    let since = Instant::now();
+    add_controlled_serve(&mut ctx, "amy", 1, since);
+
+    let live = ctx.take_pending_serves(
+        "amy",
+        (since + super::super::PENDING_SERVE_TTL)
+            .checked_sub(Duration::from_nanos(1))
+            .unwrap(),
+    );
+    assert_eq!(live, [1]);
+    assert!(ctx.uploads.contains_key(&1));
+    assert!(ctx.take_upload_events().is_empty());
+
+    ctx.uploads.remove(&1);
+    let mut token = 100;
+    let offers = ctx.pump_uploads(|| {
+        token += 1;
+        token
+    }).1;
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].requester_key, "bob");
+}
+
+#[test]
+fn an_address_at_or_after_expiry_matches_the_timer_sweep() {
+    let since = Instant::now();
+    for now in [
+        since + super::super::PENDING_SERVE_TTL,
+        since + super::super::PENDING_SERVE_TTL + Duration::from_secs(1),
+    ] {
+        let late_answer = {
+            let mut ctx = pending_serve_context(1, "amy");
+            ctx.enqueue_upload("bob", "next.mp3", synthetic(), 4096);
+            add_controlled_serve(&mut ctx, "amy", 1, since);
+            assert!(ctx.take_pending_serves("amy", now).is_empty());
+            ctx
+        };
+        let timer_sweep = {
+            let mut ctx = pending_serve_context(1, "amy");
+            ctx.enqueue_upload("bob", "next.mp3", synthetic(), 4096);
+            add_controlled_serve(&mut ctx, "amy", 1, since);
+            ctx.sweep_expired_serves(now);
+            ctx
+        };
+
+        for mut ctx in [late_answer, timer_sweep] {
+            assert!(ctx.pending_serves.is_empty());
+            assert!(!ctx.uploads.contains_key(&1), "the slot must be released");
+            let events = failed_events(&ctx);
+            assert_eq!(events.len(), 1, "the terminal record must survive");
+            assert_eq!(events[0].username, "amy");
+            assert_eq!(events[0].filename, "@@share\\pending.mp3");
+            assert_eq!(
+                events[0].status,
+                UploadStatus::Failed("peer address never arrived".to_string())
+            );
+            let mut token = 200;
+            let offers = ctx.pump_uploads(|| {
+                token += 1;
+                token
+            }).1;
+            assert_eq!(offers.len(), 1);
+            assert_eq!(offers[0].requester_key, "bob");
+        }
+    }
+}
+
+#[test]
+fn a_late_answer_and_the_sweep_leave_one_record_whichever_runs_first() {
+    let since = Instant::now();
+    let now = since + super::super::PENDING_SERVE_TTL + Duration::from_secs(1);
+
+    let mut ctx = pending_serve_context(1, "amy");
+    add_controlled_serve(&mut ctx, "amy", 1, since);
+    assert!(ctx.take_pending_serves("amy", now).is_empty());
+    ctx.sweep_expired_serves(now);
+    assert!(ctx.take_pending_serves("amy", now).is_empty());
+    assert_eq!(failed_events(&ctx).len(), 1);
+
+    let mut ctx = pending_serve_context(1, "amy");
+    add_controlled_serve(&mut ctx, "amy", 1, since);
+    ctx.sweep_expired_serves(now);
+    assert!(ctx.take_pending_serves("amy", now).is_empty());
+    assert!(ctx.take_pending_serves("amy", now).is_empty());
+    let events = failed_events(&ctx);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].status,
+        UploadStatus::Failed("peer address never arrived".to_string())
+    );
+}
+
+#[test]
+fn a_live_address_response_serves_the_offer_and_fills_the_freed_slot() {
+    let client = Client::new("u", "p");
+    let (ops, ops_rx) = mpsc::channel();
+    Client::listen_to_client_operations(
+        ops_rx,
+        client.context.clone(),
+        "u".to_string(),
+    );
+    {
+        let mut ctx = client.context.write().unwrap();
+        occupy_slot(&mut ctx, 77, "amy");
+        ctx.enqueue_upload("bob", "next.mp3", synthetic(), 4096);
+        assert!(ctx.add_pending_serve("amy", 77));
+    }
+
+    ops.send(ClientOperation::GetPeerAddressResponse {
+        username: "amy".to_string(),
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        obfuscation_type: 0,
+        obfuscated_port: 0,
+    })
+    .unwrap();
+    fence(&ops, &client, 11);
+
+    let ctx = client.context.read().unwrap();
+    assert!(ctx.active_uploads.contains_key(&77));
+    assert!(ctx.upload_queue.is_empty());
+    let served: Vec<_> =
+        ctx.uploads.values().map(|job| job.downloader.as_str()).collect();
+    assert_eq!(served, ["bob"]);
+}
+
+#[test]
+fn a_pending_serve_that_cannot_be_tracked_reports_a_failure_and_frees_the_slot() {
+    let client = Client::new("u", "p");
+    let (ops, ops_rx) = mpsc::channel();
+    Client::listen_to_client_operations(
+        ops_rx,
+        client.context.clone(),
+        "u".to_string(),
+    );
+    {
+        let mut ctx = client.context.write().unwrap();
+        occupy_slot(&mut ctx, 500, "amy");
+        ctx.enqueue_upload("bob", "next.mp3", synthetic(), 4096);
+        for token in 0..super::MAX_PENDING_SERVES_PER_PEER as u32 {
+            add_controlled_serve(&mut ctx, "amy", token, Instant::now());
+        }
+    }
+
+    ops.send(ClientOperation::StartUpload { token: 500 }).unwrap();
+    fence(&ops, &client, 11);
+
+    let ctx = client.context.read().unwrap();
+    assert!(!ctx.uploads.contains_key(&500));
+    let events = failed_events(&ctx);
+    assert_eq!(events.len(), 1, "the dropped offer's only record must survive");
+    assert_eq!(events[0].username, "amy");
+    assert_eq!(
+        events[0].status,
+        UploadStatus::Failed("pending address requests full".to_string())
+    );
+    let offered: Vec<_> =
+        ctx.uploads.values().map(|job| job.downloader.as_str()).collect();
+    assert_eq!(offered, ["bob"], "the freed slot goes to the next upload");
 }

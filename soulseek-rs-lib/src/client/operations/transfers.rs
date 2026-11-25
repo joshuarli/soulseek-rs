@@ -11,6 +11,8 @@ use super::{
     RwLockExt, ServerMessage, debug, error, info, thread, trace,
 };
 
+const QUEUE_FULL_REASON: &str = "Upload queue full";
+
 impl Client {
     pub(super) fn on_transfers(
         operation: ClientOperation,
@@ -162,13 +164,19 @@ impl Client {
                         port,
                     );
                 } else {
-                    if let Ok(mut ctx) = client_context.write_safe()
+                    let dropped = if let Ok(mut ctx) = client_context.write_safe()
                         && !ctx.add_pending_serve(&downloader, token)
                     {
                         debug!(
                             "[client] pending serves full; expiring offer {token}"
                         );
                         ctx.drop_offer(token);
+                        true
+                    } else {
+                        false
+                    };
+                    if dropped {
+                        Self::pump_upload_queue(client_context);
                     }
                     if let Ok(ctx) = client_context.read_safe()
                         && let Some(sender) = ctx.server_sender.clone()
@@ -183,7 +191,7 @@ impl Client {
                 filename,
             } => {
                 // The peer served next may not be this one.
-                match client_context.write_safe() {
+                let (registry, accepted) = match client_context.write_safe() {
                     Ok(mut ctx) => {
                         let Some(file) = ctx.shares.get(&filename) else {
                             debug!(
@@ -193,22 +201,37 @@ impl Client {
                             return;
                         };
                         let size = file.size;
-                        if !ctx.enqueue_upload(
+                        let accepted = ctx.enqueue_upload(
                             &requester_key,
                             &filename,
                             file,
                             size,
-                        ) {
+                        );
+                        if !accepted {
                             debug!(
                                 "[client] upload queue full; refusing {filename} \
                                  from {requester_key}"
                             );
                         }
+                        (ctx.peer_registry.clone(), accepted)
                     }
                     Err(e) => {
                         error!("[client] QueueUpload write: {}", e);
                         return;
                     }
+                };
+                if !accepted {
+                    if let Some(registry) = registry {
+                        let denial = crate::message::peer::build_upload_denied(
+                            &filename,
+                            QUEUE_FULL_REASON,
+                        );
+                        let _ = registry.send_to_peer(
+                            &requester_key,
+                            PeerMessage::SendMessage(denial),
+                        );
+                    }
+                    return;
                 }
                 Self::pump_upload_queue(client_context);
             }

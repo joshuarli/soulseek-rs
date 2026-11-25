@@ -13,6 +13,10 @@ use super::{
     UserInterests, UserMessage, UserPresence, UserStats, UserStatus, children,
     distributed, sorted_unique,
 };
+use crate::types::{UploadInfo, UploadStatus};
+
+const PENDING_SERVE_EXPIRED: &str = "peer address never arrived";
+const PENDING_SERVE_FULL: &str = "pending address requests full";
 
 impl ClientContext {
     /// Record an offer waiting for a peer address, unless the bounds refuse it.
@@ -50,13 +54,11 @@ impl ClientContext {
         let Some(serves) = self.pending_serves.remove(username) else {
             return Vec::new();
         };
-        serves
-            .into_iter()
-            .filter_map(|serve| {
-                (now.duration_since(serve.since) < super::PENDING_SERVE_TTL)
-                    .then_some(serve.token)
-            })
-            .collect()
+        let (live, expired): (Vec<_>, Vec<_>) = serves.into_iter().partition(
+            |serve| now.duration_since(serve.since) < super::PENDING_SERVE_TTL,
+        );
+        self.retire_expired_serves(expired.iter().map(|serve| serve.token));
+        live.into_iter().map(|serve| serve.token).collect()
     }
 
     /// Drop offers whose address request was never answered, freeing their
@@ -75,14 +77,31 @@ impl ClientContext {
             });
             !serves.is_empty()
         });
-        for token in expired {
-            self.uploads.remove(&token);
+        self.retire_expired_serves(expired);
+    }
+
+    fn retire_expired_serves(&mut self, tokens: impl IntoIterator<Item = u32>) {
+        for token in tokens {
+            self.fail_upload_job(token, PENDING_SERVE_EXPIRED);
+        }
+    }
+
+    fn fail_upload_job(&mut self, token: u32, reason: &str) {
+        if let Some(job) = self.uploads.remove(&token) {
+            self.upload_events.push(UploadInfo {
+                username: job.downloader,
+                filename: job.virtual_path,
+                size: job.size,
+                bytes_sent: 0,
+                speed_bytes_per_sec: 0.0,
+                status: UploadStatus::Failed(reason.to_string()),
+            });
         }
     }
 
     /// Release an offer we cannot track any more, so its slot is reusable.
     pub(crate) fn drop_offer(&mut self, token: u32) {
-        self.uploads.remove(&token);
+        self.fail_upload_job(token, PENDING_SERVE_FULL);
     }
 
     /// A context for the client that logs in as `username`.
