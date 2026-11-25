@@ -278,12 +278,15 @@ impl FileConfig {
     }
 
     /// Save to `path`, creating parent directories as needed.
+    ///
+    /// This is the one writer of config.toml: every caller goes through here,
+    /// so the temp-file-plus-rename policy lives in one place and there is no
+    /// second path that can leave a torn file behind.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, deser_toml::to_string(self)?)?;
-        Ok(())
+        crate::persist::state::atomic_write(
+            path,
+            deser_toml::to_string(self)?.as_bytes(),
+        )
     }
 }
 
@@ -933,5 +936,37 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "username = [unclosed").unwrap();
         assert!(FileConfig::load(&path).is_err());
+    }
+
+    #[test]
+    fn a_save_is_atomic_and_leaves_no_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        FileConfig::default().save(&path).unwrap();
+        let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(entries, vec!["config.toml".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_save_cleans_the_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let good = FileConfig {
+            username: Some("alice".into()),
+            ..FileConfig::default()
+        };
+        good.save(&path).unwrap();
+
+        // A directory at the target makes the final rename fail.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(FileConfig::default().save(&path).is_err());
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "the staging file must not survive a failed write"
+        );
     }
 }

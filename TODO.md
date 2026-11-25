@@ -19,15 +19,6 @@ Next: 23
 - **Fix with:** security
 - **Effort:** M
 
-### SOUL-17 · P2 · Durable-state writes can fail once and silently lose restart state
-
-- **Area:** Durable state and errors
-- **Where:** soulseek-rs/src/ui/main_tui/persist.rs:158-183; soulseek-rs/src/daemon/mod.rs:620-638; soulseek-rs/src/persist/config.rs:281-286; soulseek-rs/src/persist/secret.rs:80-102; soulseek-rs/src/persist/state.rs:169-172
-- **Problem:** The TUI marks a snapshot saved even when either write fails, suppressing later retries. The daemon discards state-save results entirely. config.toml is still written directly even though malformed config is fatal and other durable files already use temp-file plus rename. A full disk, permission failure, crash, or concurrent writer can therefore erase restart state or leave config unreadable without an operator-visible error. Proven structurally; no fault injection was run.
-- **Recommendation:** Advance saved snapshots only after successful writes, keep dirty state eligible for retry, surface rate-limited daemon save failures, and use the existing atomic persistence primitive for config. Decide whether cross-process config mutation needs a lock or a single owning writer.
-- **Fix with:** durable-state
-- **Effort:** M
-
 ### SOUL-20 · P2 · Transfer direction is flattened into an unconditional download accept path
 
 - **Area:** Peer protocol correctness

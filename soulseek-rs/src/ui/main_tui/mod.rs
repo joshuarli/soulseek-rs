@@ -10,14 +10,17 @@ use crate::api::SessionApi;
 use crate::models::{AppState, TuiExit};
 use crate::persist::{
     snapshot::{Snapshot, restore_messages, restore_searches},
-    state::{PersistedMessage, ResumeIntent, StateStore},
+    state::{PersistedMessage, ResumeIntent, SAVE_WARN_INTERVAL, StateStore},
 };
 use crate::error::Result;
 use crate::ui::tui::{
     DefaultTerminal,
     event::{self, Event, KeyEventKind, poll},
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub struct MainTui {
     client: Arc<dyn SessionApi>,
@@ -32,6 +35,9 @@ pub struct MainTui {
     config_path: Option<std::path::PathBuf>,
     /// Last snapshot written to disk, to skip no-op saves.
     saved_snapshot: Snapshot,
+    /// Last warning about a failed write, so a full disk does not fill the
+    /// log once per frame.
+    last_save_warning: Option<Instant>,
     /// Which divider the left mouse button is holding, if any.
     resize_drag: Option<input::ResizeDrag>,
 }
@@ -55,6 +61,7 @@ impl MainTui {
             store,
             config_path,
             saved_snapshot: Snapshot::default(),
+            last_save_warning: None,
             resize_drag: None,
         };
         tui.restore_persisted_state();
@@ -178,32 +185,70 @@ impl MainTui {
         if snapshot == self.saved_snapshot {
             return;
         }
-        if snapshot.downloads != self.saved_snapshot.downloads
-            && let Err(e) = store.save_downloads(&snapshot.downloads)
-        {
-            soulseek_rs::warn!("Could not save downloads state: {e}");
+        // Advance each field only after its own write succeeds. A failed
+        // field stays dirty and is retried on the next poll or on exit.
+        let mut saved = self.saved_snapshot.clone();
+        let mut failures = Vec::new();
+        let mut first_error = None;
+        if snapshot.downloads != saved.downloads {
+            match store.save_downloads(&snapshot.downloads) {
+                Ok(()) => saved.downloads.clone_from(&snapshot.downloads),
+                Err(e) => {
+                    failures.push("downloads");
+                    first_error.get_or_insert(e);
+                }
+            }
         }
-        if snapshot.queries != self.saved_snapshot.queries
-            && let Err(e) = store.save_search_queries(&snapshot.queries)
-        {
-            soulseek_rs::warn!("Could not save search history: {e}");
+        if snapshot.queries != saved.queries {
+            match store.save_search_queries(&snapshot.queries) {
+                Ok(()) => saved.queries.clone_from(&snapshot.queries),
+                Err(e) => {
+                    failures.push("search history");
+                    first_error.get_or_insert(e);
+                }
+            }
         }
-        if snapshot.rooms != self.saved_snapshot.rooms
-            && let Err(e) = store.save_rooms(&snapshot.rooms)
-        {
-            soulseek_rs::warn!("Could not save room state: {e}");
+        if snapshot.rooms != saved.rooms {
+            match store.save_rooms(&snapshot.rooms) {
+                Ok(()) => saved.rooms.clone_from(&snapshot.rooms),
+                Err(e) => {
+                    failures.push("room state");
+                    first_error.get_or_insert(e);
+                }
+            }
         }
-        if snapshot.messages != self.saved_snapshot.messages
-            && let Err(e) = store.save_messages(&snapshot.messages)
-        {
-            soulseek_rs::warn!("Could not save message history: {e}");
+        if snapshot.messages != saved.messages {
+            match store.save_messages(&snapshot.messages) {
+                Ok(()) => saved.messages.clone_from(&snapshot.messages),
+                Err(e) => {
+                    failures.push("message history");
+                    first_error.get_or_insert(e);
+                }
+            }
         }
-        if snapshot.unread_messages != self.saved_snapshot.unread_messages
-            && let Err(e) = store.save_unread(snapshot.unread_messages)
-        {
-            soulseek_rs::warn!("Could not save unread count: {e}");
+        if snapshot.unread_messages != saved.unread_messages {
+            match store.save_unread(snapshot.unread_messages) {
+                Ok(()) => saved.unread_messages = snapshot.unread_messages,
+                Err(e) => {
+                    failures.push("unread count");
+                    first_error.get_or_insert(e);
+                }
+            }
         }
-        self.saved_snapshot = snapshot;
+        self.saved_snapshot = saved;
+        if let Some(error) = first_error {
+            let now = Instant::now();
+            if self
+                .last_save_warning
+                .is_none_or(|at| now.duration_since(at) >= SAVE_WARN_INTERVAL)
+            {
+                self.last_save_warning = Some(now);
+                soulseek_rs::warn!(
+                    "Could not save {}: {error}",
+                    failures.join(", ")
+                );
+            }
+        }
     }
 
     pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<TuiExit> {
@@ -285,6 +330,75 @@ pub fn launch_main_tui(
         config_path,
     );
     tui.run(terminal)
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use crate::ui::fixture::TalkativeSession;
+
+    fn window(store: StateStore) -> MainTui {
+        MainTui::new(
+            Arc::new(TalkativeSession::default()),
+            "/tmp".to_string(),
+            false,
+            Duration::from_secs(1),
+            Some(store),
+            None,
+        )
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_snapshot_dirty_for_retry() {
+        let dir = tempfile::tempdir().expect("a temporary state directory");
+        // A file where the state directory should be: reads fall back to
+        // empty, every write fails.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "").expect("a blocked state directory");
+        let mut tui = window(StateStore::new(blocked));
+        restore_searches(&mut tui.state, &["beatles".to_string()]);
+
+        tui.save_persisted_state();
+        assert!(
+            tui.saved_snapshot.queries.is_empty(),
+            "a failed write must not mark the snapshot saved"
+        );
+
+        tui.store = Some(StateStore::new(dir.path().join("state")));
+        tui.save_persisted_state();
+        assert_eq!(tui.saved_snapshot.queries, vec!["beatles".to_string()]);
+        assert_eq!(
+            StateStore::new(dir.path().join("state")).load_search_queries(),
+            vec!["beatles".to_string()]
+        );
+    }
+
+    #[test]
+    fn one_failing_write_does_not_hold_back_the_other_fields() {
+        let dir = tempfile::tempdir().expect("a temporary state directory");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).expect("the state directory");
+        // Only downloads.json cannot be replaced; searches.json can.
+        std::fs::create_dir(state.join("downloads.json"))
+            .expect("an unwritable downloads target");
+        let mut tui = window(StateStore::new(state.clone()));
+        restore_searches(&mut tui.state, &["beatles".to_string()]);
+
+        tui.save_persisted_state();
+        assert_eq!(
+            tui.saved_snapshot.queries,
+            vec!["beatles".to_string()],
+            "the search history was written and must not be retried"
+        );
+        assert!(
+            tui.saved_snapshot.downloads.is_empty(),
+            "the failed downloads write stays dirty"
+        );
+        assert_eq!(
+            StateStore::new(state).load_search_queries(),
+            vec!["beatles".to_string()]
+        );
+    }
 }
 
 #[cfg(test)]

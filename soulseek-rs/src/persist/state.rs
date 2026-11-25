@@ -11,6 +11,11 @@ use deser::{Serialize, de::DeserializeOwned};
 use deser_value::Value;
 use soulseek_rs::{DownloadStatus, types::Download};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How often a writer may tell the operator that state could not be saved.
+/// A full disk fails every cycle; one warning per interval is enough.
+pub const SAVE_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The shape every file is written in today. Bump it — and convert the older
 /// shapes in `load` — when one of them changes. Version 0 stored transfers as
@@ -241,17 +246,45 @@ fn set_aside(path: &Path, why: &str) {
 }
 
 fn save<T: Serialize>(path: &Path, version: u32, data: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let envelope = deser_value::value!({
         "version": version,
         "data": deser_value::to_value(data)?
     });
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, PRETTY.to_string(&envelope)?.into_bytes())?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    atomic_write(path, PRETTY.to_string(&envelope)?.as_bytes())
+}
+
+/// The one atomic write primitive every durable file uses: stage beside the
+/// target, then rename over it. A failure at either step removes the staging
+/// file, so a later retry starts clean and never sees a torn target.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().ok_or_else(|| {
+        crate::error::Error::msg(format!(
+            "no parent directory for {}",
+            path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent)?;
+    // One staging name per target, in the same directory, so the rename
+    // cannot cross filesystems and two writers of one file collide visibly.
+    let tmp = path.with_extension("tmp");
+    let staged = (|| -> Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        // A rename is atomic but not durable: without this, a crash can leave
+        // a zero-length target even though the rename completed.
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if staged.is_err() {
+        // Cleanup is best effort and never replaces the write's own error.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    staged
 }
 
 #[cfg(test)]
@@ -467,5 +500,18 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(entries, vec!["rooms.json".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_atomic_write_removes_its_staging_file() {
+        let tmp = tempfile::tempdir().expect("a temp dir");
+        let path = tmp.path().join("state").join("rooms.json");
+        std::fs::create_dir_all(path.parent().expect("a parent")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(atomic_write(&path, b"data").is_err());
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "a retry must not inherit a stale staging file"
+        );
     }
 }

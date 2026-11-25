@@ -29,7 +29,8 @@ use crate::api::SessionApi;
 use crate::commands::{Ctx, Session};
 use crate::output::{CliError, CliResult, Out};
 use crate::persist::state::{
-    PersistedDownload, PersistedMessage, ResumeIntent, StateStore,
+    PersistedDownload, PersistedMessage, ResumeIntent, SAVE_WARN_INTERVAL,
+    StateStore,
 };
 use hub::{Hub, PendingBrowses, PendingDownload};
 use proto::ChatMessageDto;
@@ -311,15 +312,26 @@ pub fn run(
     // The listeners run on their own threads; this one only has to notice a
     // `daemon.stop` and write state back on the way past.
     let mut last_save = Instant::now();
+    let mut last_save_warning = None;
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(hub::POLL);
         if last_save.elapsed() >= SAVE_INTERVAL {
             last_save = Instant::now();
-            save(&store, session.client.as_ref(), &hub, &daemon);
+            report_save_failures(
+                &ctx.out,
+                &save(&store, session.client.as_ref(), &hub, &daemon),
+                &mut last_save_warning,
+                Instant::now(),
+            );
         }
     }
 
-    save(&store, session.client.as_ref(), &hub, &daemon);
+    report_save_failures(
+        &ctx.out,
+        &save(&store, session.client.as_ref(), &hub, &daemon),
+        &mut last_save_warning,
+        Instant::now(),
+    );
     ctx.out.status("stopping");
     // Wake listeners before joining: they are parked in readiness waiting and
     // would otherwise spend the whole stop-check interval still accepting.
@@ -668,14 +680,48 @@ fn restore(
     rooms
 }
 
-/// Write daemon-owned state back. Best-effort: a state file that cannot be
-/// written is not a reason to drop a working session.
+/// Which state files a save cycle failed to write.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SaveFailures(Vec<&'static str>);
+
+impl SaveFailures {
+    fn describe(&self) -> String {
+        self.0.join(", ")
+    }
+}
+
+/// Tell the operator about failed writes, at most once per interval. A full
+/// disk fails every cycle; silence would hide lost restart state and a warning
+/// per cycle would bury everything else in the log.
+fn report_save_failures<R: ReconnectReporter>(
+    reporter: &R,
+    failures: &SaveFailures,
+    last: &mut Option<Instant>,
+    now: Instant,
+) {
+    if failures.0.is_empty() {
+        return;
+    }
+    if last.is_some_and(|at| now.saturating_duration_since(at) < SAVE_WARN_INTERVAL)
+    {
+        return;
+    }
+    *last = Some(now);
+    reporter.warn(&format!(
+        "cannot save daemon state ({}); retrying on the next cycle",
+        failures.describe()
+    ));
+}
+
+/// Write daemon-owned state back. Every failure is carried out so the owner can
+/// report it; none is a reason to drop a working session.
 fn save(
     store: &StateStore,
     session: &dyn SessionApi,
     hub: &Hub,
     daemon: &Daemon,
-) {
+) -> SaveFailures {
+    let mut failures = SaveFailures::default();
     let mut downloads: Vec<PersistedDownload> = session
         .get_all_downloads()
         .iter()
@@ -692,7 +738,9 @@ fn save(
             }
         }
     }
-    let _ = store.save_downloads(&downloads);
+    if store.save_downloads(&downloads).is_err() {
+        failures.0.push("downloads");
+    }
 
     let messages: Vec<PersistedMessage> = hub
         .history()
@@ -704,8 +752,13 @@ fn save(
             at: crate::time::Timestamp::from_unix(message.at),
         })
         .collect();
-    let _ = store.save_messages(&messages);
-    let _ = store.save_rooms(&daemon.rooms());
+    if store.save_messages(&messages).is_err() {
+        failures.0.push("messages");
+    }
+    if store.save_rooms(&daemon.rooms()).is_err() {
+        failures.0.push("rooms");
+    }
+    failures
 }
 
 #[cfg(test)]
@@ -1079,6 +1132,85 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["paused.mp3"],
             "a deliberate pause waits for download.resume"
+        );
+    }
+
+    fn test_daemon() -> Daemon {
+        Daemon {
+            session: Arc::new(crate::ui::fixture::TalkativeSession::default()),
+            secrets: Arc::new(crate::persist::secret::MemoryStore::default()),
+            hub: Arc::new(Hub::new()),
+            browses: Arc::new(PendingBrowses::default()),
+            downloads: Arc::new(Mutex::new(Vec::new())),
+            paused: Arc::new(Mutex::new(Vec::new())),
+            download_dir: Mutex::new("/tmp".to_string()),
+            use_username_dirs: false,
+            server: "server.invalid:2416".to_string(),
+            token: "t".to_string(),
+            started: Instant::now(),
+            stop: Arc::new(AtomicBool::new(false)),
+            open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rooms: Mutex::new(Vec::new()),
+            searches: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn failed_daemon_state_writes_are_carried_out() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "").expect("a blocked state directory");
+        let daemon = test_daemon();
+
+        let failures = save(
+            &StateStore::new(blocked),
+            daemon.session.as_ref(),
+            &daemon.hub,
+            &daemon,
+        );
+        assert_eq!(failures.0, ["downloads", "messages", "rooms"]);
+    }
+
+    #[test]
+    fn a_clean_save_reports_no_failures() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = StateStore::new(dir.path().join("state"));
+        let daemon = test_daemon();
+        let failures =
+            save(&store, daemon.session.as_ref(), &daemon.hub, &daemon);
+        assert!(failures.0.is_empty());
+        assert!(dir.path().join("state").join("downloads.json").exists());
+    }
+
+    #[test]
+    fn save_failure_warnings_are_rate_limited() {
+        let reporter = RecordingReporter::default();
+        let mut last = None;
+        let failures = SaveFailures(vec!["downloads", "rooms"]);
+        let now = Instant::now();
+
+        report_save_failures(&reporter, &failures, &mut last, now);
+        report_save_failures(
+            &reporter,
+            &failures,
+            &mut last,
+            now + Duration::from_secs(5),
+        );
+        let warnings = reporter.warnings.lock().expect("warnings");
+        assert_eq!(warnings.len(), 1, "a full disk must not fill the log");
+        assert!(warnings[0].contains("downloads, rooms"));
+        drop(warnings);
+
+        report_save_failures(
+            &reporter,
+            &failures,
+            &mut last,
+            now + SAVE_WARN_INTERVAL,
+        );
+        assert_eq!(
+            reporter.warnings.lock().expect("warnings").len(),
+            2,
+            "the next interval surfaces the continuing failure again"
         );
     }
 
