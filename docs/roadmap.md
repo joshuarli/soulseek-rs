@@ -2,23 +2,28 @@
 
 ## Completion campaign (networking correctness)
 
-Review checkpoint: `79bc539`. Base: `d703c30`. Status: UP-1, FR-1, SH-1,
-ST-1, TR-1 and NX-1 are accepted on `main`; `make test` (1089 passed) and clippy
-are green. Listener threads are now owned and joined by the daemon, and a
-focused standard (`owned-concurrency`) makes detached long-lived threads a
-must-fix finding. NX-1: bidirectional interoperability with headless Nicotine+
-3.3.11 was verified against a local soulfind — this client browsed and
-downloaded `nico-share\nico-track.mp3` from Nicotine+, and a Python-driven
-Nicotine+ `core` browsed this daemon's `rustshare` and downloaded
-`share-rust\rust-track.mp3` to `Finished`. The earlier `0.0.0.0:0` peer address
-was a test-fixture fault: the Nicotine+ config file used Python-style quoted
-values (`login = 'nicouser'`), so the client logged in with quotes in its
-username and soulfind reported an address for a different name. RS-1 is now
-accepted: `scripts/daemon_rss.sh` writes a revisioned, machine-readable RSS and
-thread envelope (`benchmarks/daemon-rss.json`: 9456 KiB peak, 12 threads over
-121 samples at `45d53c2`), and the mixed-load harness reports peak RSS and the
-revision behind its baseline. Unbounded actor mailboxes and the operation
-channel remain a documented boundary, not a claimed memory budget.
+Review checkpoint: the follow-up review of `d4a3696`. Base: `d703c30`.
+Status: UP-1, FR-1, SH-1, ST-1, TR-1 and NX-1 are accepted on `main`.
+`make test` (1094 passed) and clippy are green. Listener threads are owned and
+joined by the daemon; idle listeners now wait on OS readiness with an explicit
+shutdown wakeup, and a regression counts idle wakeups. A focused standard
+(`owned-concurrency`) makes detached long-lived threads a must-fix finding.
+
+NX-1: bidirectional interoperability with headless Nicotine+ 3.3.11 was
+verified against a local soulfind in both directions. The earlier `0.0.0.0:0`
+peer address was a quoted-username test-fixture fault, not a product defect.
+
+RS-1 remains **incomplete**. The verifier now proves its workload before
+accepting evidence: every search/browse/download/upload must succeed, both
+copies must hash-match distinct per-round fixtures, and the executed binary's
+identity and build are recorded. A deliberately failing client exits 4 and
+writes no JSON. A revisioned reduced-profile stress result has all fixtures
+ready and all four functional dimensions at 100%
+(`benchmarks/stress-functional.json`). The aggregate-resource controls are
+still not implemented: actor mailboxes and the client operation channel remain
+unbounded, and the default 1024-peer stress profile cannot complete on this
+host because thread and socket creation fail. This is core hardening landed,
+not a proven resource budget.
 
 ### Sequence
 
@@ -46,10 +51,11 @@ channel remain a documented boundary, not a claimed memory budget.
    NAT-PMP renewals validate granted port and lifetime. Acceptance: targeted
    unit tests in `daemon/server/transport` and `port_mapping`.
    Owner: `campaign/startup`.
-6. **RS-1** Aggregate resource envelope and reproducible workloads: audit
-   unbounded queues, add machine-readable evidence with exact revisions, and
-   measure under mixed load. Acceptance: documented commands and results with
-   explicit measurement boundaries. Owner: parent.
+6. **RS-1** Aggregate resource envelope and reproducible workloads: *open*.
+   Revisioned machine-readable evidence and a gating verifier are in place, but
+   the unbounded actor mailboxes and operation channel have no admission or
+   backpressure control, and the default stress profile is bounded by the
+   host. Acceptance remains unmet. Owner: parent.
 7. **NX-1** Network contract and headless Nicotine+ interoperability evidence.
    Acceptance: deterministic local checks; independent client attempt recorded
    with exact command or precise blocker. Owner: parent.
@@ -57,9 +63,10 @@ channel remain a documented boundary, not a claimed memory budget.
 ### Needs environment
 
 - A local soulfind for server-backed verification (`SOULSEEK_E2E_REQUIRED=1`).
-  The final run at `6ed4d85` was green (1084 passed). Earlier runs saw soulfind
-  startup and login timeouts under host load, including a `cli_e2e` case that
-  fails at the pre-campaign commit too; neither is a campaign regression.
+  The run after the closure work failed only in
+  `json_records_carry_every_extra_field_the_readme_names`, a login timeout that
+  reproduces on the pre-campaign commit; the rest passed. A host with more
+  thread and descriptor headroom is needed for the default stress profile.
 - An isolated Nicotine+ installation with `--headless` for interoperability.
   Headless 3.3.11 connected to a local soulfind. Its config values must be
   unquoted: `login = nicouser`, not `login = 'nicouser'`, or the quotes become

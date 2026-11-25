@@ -58,21 +58,22 @@ a separate campaign document.
 `make clean` removes this checkout’s build output in `./target`. It refuses symlinks and ordinary files at those paths.
 
 - `make test` (CI: `.github/workflows/ci.yml`, on `pull_request` and pushes to
-  `main`): 1089 passed, 2 ignored, including the five PTY snapshot frames;
+  `main`): 1094 passed, 2 ignored, including the five PTY snapshot frames;
   cold 251.87s, warm 27s to 64s on a busy macOS host with four build jobs.
   `make lint` (`lint.yml`): cold 180.94s, warm 39s to 86s, clippy on all targets
   with `-D warnings`.
 - Server-backed verification with `SOULFIND_BIN` and `SOULSEEK_E2E_REQUIRED=1`
-  at `6ed4d85`: 1084 passed, 0 failed with two test threads. Earlier runs saw
-  soulfind startup and login timeouts under host load, including a `cli_e2e`
-  case that fails at the pre-campaign commit too; neither is a campaign
-  regression.
+  after the closure work: all cases passed except
+  `json_records_carry_every_extra_field_the_readme_names`, a login timeout that
+  reproduces on the pre-campaign commit. An earlier full run at `6ed4d85` was
+  green (1084 passed); host load makes individual soulfind instances flaky.
 - Independent-client interoperability: `scripts/interop_nicotine.py` drives
   headless Nicotine+ against a running daemon and checks both browse and
   download directions. Nicotine+ config values must be unquoted.
 - Resource evidence: `scripts/daemon_rss.sh` writes a revisioned RSS/thread
-  envelope under a mixed local load; see `benchmarks/README.md` for results
-  and measurement boundaries.
+  envelope only after every required workload operation succeeds and both
+  transfers hash-match. RS-1 remains open: the actor mailboxes and operation
+  channel are still unbounded; see `benchmarks/README.md`.
 - Tiers (warm): unit about 770 tests (`soulseek-rs`, `soulseek-rs-lib`; 1s each); local-socket tests (daemon transport bounds in
   `src/daemon/server`, `resume_e2e.rs`, `persist_e2e.rs`); server e2e 208 tests
   (`cli_e2e`, `daemon_protocol_e2e`, `tui_e2e`, lib `e2e`: client and peer
