@@ -3,6 +3,11 @@
 //! Scanning a directory produces a read-only [`Shares`] snapshot keyed by the
 //! peer-facing *virtual path* (the shared directory's own name followed by the
 //! backslash-separated relative path, matching the Soulseek wire convention).
+//!
+//! A snapshot stores the canonical root path and the device/inode of both the
+//! root directory and each file, then reopens the root path for every upload.
+//! It does not retain an open root descriptor: see [`Shares::scan`] and
+//! [`open_contained`] for the exact containment policy and its limits.
 
 mod audio;
 
@@ -30,12 +35,23 @@ pub struct SharedFile {
     /// The real filesystem path, for display and logging only. Bytes are
     /// always reopened through [`open_contained`], never through this string.
     pub real_path: PathBuf,
-    /// Canonical share root this file was indexed under.
+    /// Canonical share root this file was indexed under. Uploads reopen this
+    /// path; no root descriptor is kept, so moving or renaming the root (or an
+    /// ancestor) breaks serving until the next scan.
     pub root: PathBuf,
     /// Path relative to `root`, used to walk from a root directory fd at open
-    /// time so neither `..` nor a late symlink can escape the share.
+    /// time so neither `..` nor a late symlink can escape the share. Renaming
+    /// a directory inside the root changes this path and needs a rescan.
     pub relative: PathBuf,
-    /// Identity of the indexed file; a replacement is refused until reindex.
+    /// Device/inode of the root directory at scan time. The root reopened for
+    /// an upload must still be that directory; a different directory installed
+    /// at the recorded path is refused.
+    pub root_dev: u64,
+    pub root_ino: u64,
+    /// Device/inode of the indexed file at scan time, checked against the
+    /// descriptor actually read. This proves identity, not path containment
+    /// (that comes from the `O_NOFOLLOW` walk) and not that the file's bytes
+    /// are unchanged: writing in place keeps the same inode.
     pub dev: u64,
     pub ino: u64,
     pub size: u64,
@@ -62,6 +78,25 @@ impl Shares {
     /// Scan `root` recursively into a share index. Symlinks and unreadable
     /// entries are skipped so a single bad entry never aborts the scan.
     ///
+    /// The snapshot records a canonical root path and root directory identity
+    /// and is immutable. The serving policy is:
+    ///
+    /// - **Root replacement:** a different directory at the recorded path is
+    ///   refused at open time by root device/inode, even if it holds a file
+    ///   with the same relative path.
+    /// - **Ancestor rename:** the root is reopened by its recorded path, not
+    ///   followed from a retained descriptor. Renaming the root or one of its
+    ///   ancestors changes that path, so uploads fail until a fresh scan.
+    /// - **Symlink:** the root is resolved once here. A symlink introduced
+    ///   later in an ancestor can redirect the reopened path, but the root
+    ///   identity check refuses it unless the symlink lands on the same
+    ///   directory; symlinks at or below the root are never followed.
+    /// - **File replacement:** the leaf device/inode is checked against the
+    ///   opened descriptor, so a replacement is refused until a rescan.
+    ///   In-place writes to the indexed inode are not detected.
+    /// - **Rescan:** only a new snapshot updates roots, relative paths and
+    ///   identities; it is the way to accept any of the changes above.
+    ///
     /// # Errors
     /// Returns an error only if `root` itself cannot be read.
     pub fn scan(root: &Path) -> io::Result<Self> {
@@ -74,7 +109,8 @@ impl Shares {
     /// Scan several roots into one merged index. Unreadable roots are
     /// skipped (with a log line) instead of failing the whole scan, and
     /// roots that share a directory name get a ` (2)`, ` (3)`… suffix so
-    /// their virtual paths cannot collide.
+    /// their virtual paths cannot collide. Each root captures and serves
+    /// under the same identity policy documented on [`Self::scan`].
     #[must_use]
     pub fn scan_many(roots: &[PathBuf]) -> Self {
         let mut files = Vec::new();
@@ -101,9 +137,24 @@ impl Shares {
             // canonical root so the upload path cannot be redirected through
             // a symlink in the root's ancestors.
             let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            let Ok(root_meta) = std::fs::metadata(&canonical) else {
+                crate::warn!(
+                    "Skipping unreadable shared directory {}",
+                    root.display()
+                );
+                continue;
+            };
+            if !root_meta.is_dir() {
+                crate::warn!(
+                    "Skipping shared directory that is not a directory {}",
+                    root.display()
+                );
+                continue;
+            }
             scan_root(
                 root,
                 &canonical,
+                (root_meta.dev(), root_meta.ino()),
                 &name,
                 &mut files,
                 &mut folder_count,
@@ -215,6 +266,7 @@ fn root_display_name(root: &Path) -> String {
 fn scan_root(
     root: &Path,
     canonical_root: &Path,
+    root_identity: (u64, u64),
     root_name: &str,
     files: &mut Vec<SharedFile>,
     folder_count: &mut usize,
@@ -252,10 +304,12 @@ fn scan_root(
                 files.push(SharedFile {
                     search_key: virtual_path.to_lowercase(),
                     virtual_path,
-                    attributes: audio::probe(&path),
+                    attributes: probe_indexed(&path, meta.dev(), meta.ino()),
                     real_path: path.clone(),
                     root: canonical_root.to_path_buf(),
                     relative,
+                    root_dev: root_identity.0,
+                    root_ino: root_identity.1,
                     dev: meta.dev(),
                     ino: meta.ino(),
                     size: meta.len(),
@@ -267,31 +321,95 @@ fn scan_root(
     *folder_count += folders_with_files.len();
 }
 
+/// Read audio attributes only after confirming the scan is still looking at
+/// the regular file it just indexed. The probe API takes a path and reopens it,
+/// so this is a preflight that rules out a FIFO already in place at probe time;
+/// it is not an atomic guard against a swap between the preflight and that
+/// reopen. An audio probe that blocks during scanning does not hold an upload
+/// descriptor and cannot wedge a transfer.
+fn probe_indexed(path: &Path, dev: u64, ino: u64) -> Vec<(u32, u32)> {
+    const FLAGS: libc::c_int =
+        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+
+    let Ok(name) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return Vec::new();
+    };
+    // SAFETY: `name` is a live C string and this call owns the fresh fd.
+    let fd = unsafe { libc::open(name.as_ptr(), FLAGS) };
+    if fd < 0 {
+        return Vec::new();
+    }
+    // SAFETY: `open` returned a fresh, owned file descriptor.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let Ok(meta) = file.metadata() else {
+        return Vec::new();
+    };
+    if !meta.file_type().is_file()
+        || meta.dev() != dev
+        || meta.ino() != ino
+    {
+        return Vec::new();
+    }
+    audio::probe(path)
+}
+
+/// Restore blocking reads on a regular file that was opened nonblocking only
+/// so it could be inspected safely.
+fn clear_nonblock(fd: libc::c_int) -> io::Result<()> {
+    // SAFETY: `fd` is owned by the caller and valid for this call.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above; only the nonblocking flag on this open description is
+    // changed.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Open an indexed file for upload, confined to the share root it was scanned
 /// under.
 ///
-/// The path recorded at scan time is a string; between then and the
-/// transfer a symlink or a whole directory can be swapped in. Walking from an
-/// already-open root fd with `O_NOFOLLOW` at each step closes that race: the
-/// descriptors we check are the descriptors we read from.
+/// The root is reopened from the path captured at scan time; this function
+/// does not have a descriptor from scan time to follow. The reopened directory
+/// must still have the root device/inode from the index, so a different
+/// directory installed at that path is refused. Because the path is reopened,
+/// renaming the root or an ancestor breaks serving until a rescan.
 ///
-/// A file whose device/inode no longer matches the index is refused, so a
-/// replaced file cannot be served under an old virtual path until the next
-/// reindex. Regular files only: a swapped-in FIFO must not wedge a transfer.
+/// Walking with `O_NOFOLLOW` at each step means neither `..` nor a symlink in
+/// or below the root can escape it. The leaf is opened with `O_NONBLOCK` so a
+/// regular file replaced by a FIFO cannot block here; the descriptor is
+/// inspected before it is returned, and rejected descriptors are released.
+/// The leaf device/inode is checked on that same descriptor, so a replacement
+/// file is refused until the next scan. That check proves identity only: it
+/// says nothing about path containment, in-place changes to the same inode,
+/// or content read after the descriptor is returned.
 ///
 /// # Errors
-/// Returns the first I/O error, or `InvalidData` when the entry would leave
-/// the root, is no longer a regular file, or is not the indexed file.
+/// Returns the first I/O error, or `InvalidData` when the reopened root is no
+/// longer the indexed directory, the entry would leave the root, it is not a
+/// regular file, or it is not the indexed file.
 pub fn open_contained(file: &SharedFile) -> io::Result<std::fs::File> {
-    const FLAGS: libc::c_int = libc::O_RDONLY
+    const DIR_FLAGS: libc::c_int = libc::O_RDONLY
         | libc::O_CLOEXEC
         | libc::O_NOFOLLOW
         | libc::O_DIRECTORY;
+    const LEAF_FLAGS: libc::c_int =
+        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 
     let mut directory = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(FLAGS)
+        .custom_flags(DIR_FLAGS)
         .open(&file.root)?;
+    let root_meta = directory.metadata()?;
+    if root_meta.dev() != file.root_dev || root_meta.ino() != file.root_ino {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the share root changed since it was indexed",
+        ));
+    }
     let components: Vec<_> = file.relative.components().collect();
     let Some((last, parents)) = components.split_last() else {
         return Err(io::Error::new(
@@ -315,7 +433,7 @@ pub fn open_contained(file: &SharedFile) -> io::Result<std::fs::File> {
         // SAFETY: `directory` is owned by this call and stays open until the
         // new descriptor replaces it; `name` is a live C string for the call.
         let fd = unsafe {
-            libc::openat(directory.as_raw_fd(), name.as_ptr(), FLAGS)
+            libc::openat(directory.as_raw_fd(), name.as_ptr(), DIR_FLAGS)
         };
         if fd < 0 {
             return Err(io::Error::last_os_error());
@@ -329,7 +447,6 @@ pub fn open_contained(file: &SharedFile) -> io::Result<std::fs::File> {
             "a shared path may not traverse its root",
         ));
     };
-    let leaf_flags = FLAGS & !libc::O_DIRECTORY;
     // SAFETY: as above, both descriptors are valid for the duration of the
     // call and `name` is a borrowed encoded path component.
     let name = CString::new(name.as_encoded_bytes()).map_err(|_| {
@@ -339,7 +456,7 @@ pub fn open_contained(file: &SharedFile) -> io::Result<std::fs::File> {
         )
     })?;
     let fd = unsafe {
-        libc::openat(directory.as_raw_fd(), name.as_ptr(), leaf_flags)
+        libc::openat(directory.as_raw_fd(), name.as_ptr(), LEAF_FLAGS)
     };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -356,6 +473,7 @@ pub fn open_contained(file: &SharedFile) -> io::Result<std::fs::File> {
             "the shared file changed since it was indexed",
         ));
     }
+    clear_nonblock(opened.as_raw_fd())?;
     Ok(opened)
 }
 
@@ -375,6 +493,7 @@ pub(crate) fn indexed_file(path: &Path) -> SharedFile {
     let root = path.canonicalize().expect("a real fixture path");
     let name = root.file_name().expect("a file name").to_os_string();
     let parent = root.parent().expect("a parent").to_path_buf();
+    let root_meta = std::fs::metadata(&parent).expect("fixture root metadata");
     let meta = std::fs::metadata(&root).expect("fixture metadata");
     SharedFile {
         virtual_path: name.to_string_lossy().into_owned(),
@@ -382,6 +501,8 @@ pub(crate) fn indexed_file(path: &Path) -> SharedFile {
         real_path: root,
         root: parent,
         relative: PathBuf::from(name),
+        root_dev: root_meta.dev(),
+        root_ino: root_meta.ino(),
         dev: meta.dev(),
         ino: meta.ino(),
         size: meta.len(),
@@ -399,6 +520,8 @@ pub(crate) fn synthetic_file(path: &Path) -> SharedFile {
         real_path: path.to_path_buf(),
         root: root.to_path_buf(),
         relative: PathBuf::from(name),
+        root_dev: 0,
+        root_ino: 0,
         dev: 0,
         ino: 0,
         size: 0,
@@ -650,6 +773,121 @@ mod tests {
             std::io::ErrorKind::InvalidData
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn mkfifo(path: &std::path::Path) {
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+            .expect("a fixture path without NUL bytes");
+        // SAFETY: `name` is a live C string for this call.
+        assert_eq!(
+            unsafe { libc::mkfifo(name.as_ptr(), 0o600) },
+            0,
+            "mkfifo failed"
+        );
+    }
+
+    #[cfg(unix)]
+    fn open_fd_count() -> usize {
+        std::fs::read_dir("/dev/fd").map_or(0, Iterator::count)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_swapped_in_after_indexing_is_rejected_before_a_deadline() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let root = temp_tree();
+        let file = shares_file(&root, "top.mp3");
+        std::fs::remove_file(root.join("top.mp3")).unwrap();
+        mkfifo(&root.join("top.mp3"));
+
+        let (tx, rx) = mpsc::channel();
+        let target = file.clone();
+        let worker = thread::spawn(move || {
+            let _ = tx.send(open_contained(&target).map(|_| ()));
+        });
+        let outcome = rx.recv_timeout(Duration::from_secs(3));
+        worker.join().expect("the opening thread did not panic");
+        match outcome {
+            Ok(result) => assert_eq!(
+                result.expect_err("a FIFO is not the indexed file").kind(),
+                std::io::ErrorKind::InvalidData
+            ),
+            Err(error) => panic!("opening a FIFO wedged past the deadline: {error}"),
+        }
+
+        let before = open_fd_count();
+        for _ in 0..64 {
+            assert_eq!(
+                open_contained(&file).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+        if before > 0 {
+            assert!(
+                open_fd_count() <= before + 4,
+                "rejected opens leaked descriptors"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_swapped_root_directory_is_refused_until_the_next_scan() {
+        let root = temp_tree();
+        let file = shares_file(&root, "top.mp3");
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        let moved = root.with_file_name(format!("{name}-moved"));
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("top.mp3"), b"evil").unwrap();
+
+        assert_eq!(
+            open_contained(&file).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let shares = Shares::scan(&root).unwrap();
+        let refreshed = shares
+            .get(&format!("{name}\\top.mp3"))
+            .expect("the replacement root is indexed");
+        let mut bytes = Vec::new();
+        (&open_contained(&refreshed).expect("the replacement root serves"))
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"evil");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(moved);
+    }
+
+    #[test]
+    fn moving_an_ancestor_invalidates_the_root_path_until_a_rescan() {
+        let parent = temp_tree();
+        let root = parent.join("music");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("top.mp3"), b"aaaa").unwrap();
+        let file = shares_file(&root, "top.mp3");
+
+        let moved_parent = parent.with_file_name(format!(
+            "{}-moved",
+            parent.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::rename(&parent, &moved_parent).unwrap();
+        assert!(open_contained(&file).is_err(), "the recorded path is gone");
+
+        let moved_root = moved_parent.join("music");
+        let shares = Shares::scan(&moved_root).unwrap();
+        let refreshed = shares
+            .get("music\\top.mp3")
+            .expect("the moved root is indexed");
+        let mut bytes = Vec::new();
+        (&open_contained(&refreshed).expect("the moved root serves"))
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"aaaa");
+        let _ = std::fs::remove_dir_all(moved_parent);
     }
 
     fn shares_file(root: &std::path::Path, name: &str) -> super::SharedFile {
