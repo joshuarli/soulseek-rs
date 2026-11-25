@@ -3,7 +3,7 @@
 ## Completion campaign (networking correctness)
 
 Review checkpoint: `79bc539`. Base: `d703c30`. Status: UP-1, FR-1, SH-1,
-ST-1 and TR-1 are accepted on `main` and verified by `make test` (1087 passed)
+ST-1 and TR-1 are accepted on `main` and verified by `make test` (1089 passed)
 and clippy. Listener threads are now owned and joined by the daemon, and a
 focused standard (`owned-concurrency`) makes detached long-lived threads a
 must-fix finding. RS-1 has deterministic benchmarks and the stress workload but
