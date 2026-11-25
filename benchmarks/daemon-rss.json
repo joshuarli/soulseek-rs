@@ -1,9 +1,9 @@
 {
-  "revision": "b574c02ba612cb4b5d64cf772f3df9a0f85fd07e",
+  "revision": "043fc0efe193d83deb73c33b6e472b096b498501",
   "executed": {
     "binary": "/Users/josh/repos/soulseek-rs/target/debug/soulseek-rs",
-    "sha256": "7e5607b40f966bd8479c4ff40327a78ecf72d427bef307477d5713887f933de4",
-    "version": "soulseek-rs 19.1.0 (git 9a09d7d07065)",
+    "sha256": "c689d0bbd7bccdabe048bf4ec1e39cc7da3dd40a80b6f988ed9047936301a0f3",
+    "version": "soulseek-rs 19.1.0 (git 34517ed13075)",
     "build_profile": "debug",
     "environment": {
       "system": "Darwin",
@@ -22,14 +22,14 @@
       "download",
       "upload"
     ],
-    "distinct_fixture_bytes": 30,
+    "distinct_fixture_bytes": 296,
     "verified_in_both_directions": true,
-    "server_port": 56351
+    "server_port": 59084
   },
   "observed": {
-    "peak_rss_kib": 11712,
+    "peak_rss_kib": 11872,
     "peak_threads": 18,
-    "sample_count": 1542
+    "sample_count": 1522
   },
   "boundaries": "One measured daemon plus one seeder and soulfind on one host. RSS and thread count are sampled from the daemon process only, every 100 ms. This measures lifecycle and mixed-load growth, not an idle-daemon baseline or a saturation ceiling. Actor mailboxes and the client operation channel remain unbounded, so no global memory budget is claimed."
 }
