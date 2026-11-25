@@ -13,10 +13,18 @@ use super::{
 
 impl ServerActor {
     pub(super) fn handle_message(&mut self, msg: ServerMessage) {
-        if !matches!(self.connection_state, ConnectionState::Connected)
+        let no_session = !matches!(
+            self.connection_state,
+            ConnectionState::Connected
+        );
+        let before_verdict = !self.post_login_ready && Self::is_outbound(&msg);
+        if (no_session || before_verdict)
             && !matches!(
                 &msg,
-                ServerMessage::ProcessRead | ServerMessage::Login { .. }
+                ServerMessage::ProcessRead
+                    | ServerMessage::Login { .. }
+                    | ServerMessage::LoginStatus(_)
+                    | ServerMessage::Relogged
             )
         {
             self.queued_messages.push(msg);
@@ -398,6 +406,11 @@ impl ServerActor {
             self.forward_to_client(ClientOperation::ResetDistributed);
             // The server holds interests only for the life of a session.
             self.forward_to_client(ClientOperation::SessionEstablished);
+            self.post_login_ready = true;
+            let replay = std::mem::take(&mut self.queued_messages);
+            for message in replay {
+                self.handle_message(message);
+            }
         }
         match self.context.write_safe() {
             Ok(mut ctx) => ctx.logged_in = Some(message),
@@ -472,7 +485,8 @@ impl ServerActor {
         if let Ok(mut ctx) = self.context.write_safe() {
             ctx.logged_in = None;
         }
-        self.queue_message(MessageFactory::build_login_message(
+        self.post_login_ready = false;
+        self.queue_login(MessageFactory::build_login_message(
             &username, &password, version,
         ));
 

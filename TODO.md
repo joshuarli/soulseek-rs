@@ -1,15 +1,6 @@
 Prefix: SOUL
 Next: 23
 
-### SOUL-12 · P1 · Reconnect replay can write operations before login or silently erase them
-
-- **Area:** Server session recovery
-- **Where:** soulseek-rs-lib/src/actor/server_actor/handlers.rs:16-23,461-477; soulseek-rs-lib/src/actor/server_actor.rs:559-568,628-633,669-675; soulseek-rs-lib/src/client/connection.rs:263-270; soulseek-rs-lib/src/client/downloads.rs:158-181
-- **Problem:** While disconnected, non-login server operations are appended to one FIFO. A reconnecting Login is appended behind them, and connection establishment flushes the FIFO unchanged, so queued operations can reach the server before Login. If the reconnect dial fails, disconnect clears the whole queue. Public operations report success once accepted by the actor, so a download can remain queued indefinitely without its server request either replaying correctly or failing back to the caller. Proven by the queue ordering and clearing code; server enforcement of pre-login rejection was not externally tested.
-- **Recommendation:** Make session replay explicit: either fail non-login operations when the session drops and propagate that failure to dependent transfers, or hold them in a post-login replay buffer that is flushed only after a successful login. Login must be the first frame of a new server session. Add ordering and reconnect-failure regression tests.
-- **Fix with:** lifecycle-concurrency
-- **Effort:** M
-
 ### SOUL-13 · P1 · Network-facing work still has no aggregate admission and ownership envelope
 
 - **Area:** Concurrency and resource bounds

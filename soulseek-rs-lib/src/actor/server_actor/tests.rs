@@ -131,10 +131,13 @@ fn a_login_on_a_parked_actor_dials_again_and_queues_the_login() {
         matches!(actor.connection_state, ConnectionState::Connecting { .. }),
         "a parked actor must dial again on login"
     );
-    assert_eq!(
-        actor.queued_messages.len(),
-        1,
+    assert!(
+        actor.login_frame.is_some(),
         "the login waits for the connection to come up"
+    );
+    assert!(
+        actor.queued_messages.is_empty(),
+        "the replay buffer must not hold the session-opening frame"
     );
 }
 
@@ -211,7 +214,8 @@ fn a_cancelled_actor_never_writes_the_login_it_queued() {
         ClientVersion::default(),
         response,
     );
-    assert_eq!(actor.queued_messages.len(), 1);
+    assert!(actor.login_frame.is_some());
+    assert!(actor.queued_messages.is_empty());
 
     cancel.cancel();
     actor.tick();
@@ -273,4 +277,165 @@ fn post_login_messages_carry_counts_and_conditional_wait_port() {
     let no_listen = post_login_messages(false, 4321, 3, 7);
     let codes: Vec<u32> = no_listen.iter().map(code_of).collect();
     assert_eq!(codes, vec![35, 28]);
+}
+
+fn frame_codes(bytes: &[u8]) -> Vec<u32> {
+    let mut codes = Vec::new();
+    let mut position = 0;
+    while position + 4 <= bytes.len() {
+        let length =
+            u32::from_le_bytes(bytes[position..position + 4].try_into().unwrap())
+                as usize;
+        position += 4;
+        if length < 4 || position + length > bytes.len() {
+            break;
+        }
+        codes.push(u32::from_le_bytes(
+            bytes[position..position + 4].try_into().unwrap(),
+        ));
+        position += length;
+    }
+    codes
+}
+
+fn connected_peer_actor() -> (ServerActor, TcpStream) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = TcpStream::connect(address).unwrap();
+    client.set_nonblocking(true).unwrap();
+    let (server_side, _) = listener.accept().unwrap();
+    let mut actor = parked_actor(address.port());
+    actor.stream = Some(client);
+    actor.connection_state = ConnectionState::Connecting {
+        since: Instant::now(),
+    };
+    (actor, server_side)
+}
+
+#[test]
+fn the_login_frame_precedes_operations_queued_while_disconnected() {
+    use std::io::Read;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = TcpStream::connect(address).unwrap();
+    client.set_nonblocking(true).unwrap();
+    let (mut server_side, _) = listener.accept().unwrap();
+    server_side.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    let mut actor = parked_actor(address.port());
+    actor.stream = Some(client);
+    actor.connection_state = ConnectionState::Connecting {
+        since: Instant::now(),
+    };
+
+    actor.handle_message(ServerMessage::GetPeerAddress("peer".into()));
+    let (response, _verdict) = std::sync::mpsc::channel();
+    actor.handle_login(
+        "u".into(),
+        "p".into(),
+        ClientVersion::default(),
+        response,
+    );
+    if let Ok(mut context) = actor.context.write() {
+        context.logged_in = Some(true);
+    }
+
+    for _ in 0..20 {
+        actor.tick();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(actor);
+
+    let mut written = Vec::new();
+    server_side.read_to_end(&mut written).unwrap();
+    let codes = frame_codes(&written);
+    assert_eq!(
+        codes.first(),
+        Some(&1),
+        "Login (code 1) must be the first frame of a new session: {codes:?}"
+    );
+}
+
+#[test]
+fn a_failed_reconnect_does_not_erase_operations_waiting_for_login() {
+    let mut actor = parked_actor(1);
+    let (response, verdict) = std::sync::mpsc::channel();
+
+    actor.handle_message(ServerMessage::GetPeerAddress("peer".into()));
+    actor.handle_login(
+        "u".into(),
+        "p".into(),
+        ClientVersion::default(),
+        response,
+    );
+
+    assert!(matches!(
+        verdict.recv_timeout(Duration::from_secs(5)),
+        Ok(Err(SoulseekRs::NotConnected))
+    ));
+    assert!(
+        actor
+            .queued_messages
+            .iter()
+            .any(|m| matches!(m, ServerMessage::GetPeerAddress(_))),
+        "a refused dial must keep the operation for the next login"
+    );
+}
+
+#[test]
+fn replay_is_held_until_the_login_verdict_and_then_drained() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = TcpStream::connect(address).unwrap();
+    client.set_nonblocking(true).unwrap();
+    let (_server_side, _) = listener.accept().unwrap();
+    let mut actor = parked_actor(address.port());
+    actor.stream = Some(client);
+    actor.connection_state = ConnectionState::Connecting {
+        since: Instant::now(),
+    };
+
+    actor.handle_message(ServerMessage::GetPeerAddress("peer".into()));
+    actor.tick();
+
+    assert!(
+        actor
+            .queued_messages
+            .iter()
+            .any(|m| matches!(m, ServerMessage::GetPeerAddress(_))),
+        "connection establishment alone must not replay operations"
+    );
+    actor.handle_login_status(false);
+    assert!(
+        actor
+            .queued_messages
+            .iter()
+            .any(|m| matches!(m, ServerMessage::GetPeerAddress(_))),
+        "a rejected verdict replays nothing"
+    );
+
+    actor.handle_login_status(true);
+    assert!(
+        actor.queued_messages.is_empty(),
+        "a successful login drains the replay buffer in order"
+    );
+}
+
+#[test]
+fn an_operation_sent_before_the_verdict_waits_in_the_replay_buffer() {
+    let (mut actor, _server_side) = connected_peer_actor();
+    actor.tick();
+
+    actor.file_search(7, "query");
+
+    assert!(
+        actor
+            .queued_messages
+            .iter()
+            .any(|m| matches!(m, ServerMessage::SendMessage(_))),
+        "a frame queued before login must not reach the socket"
+    );
+    actor.handle_login_status(true);
+    assert!(actor.queued_messages.is_empty());
 }

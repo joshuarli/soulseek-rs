@@ -284,7 +284,12 @@ pub struct ServerActor {
     dispatcher: Option<MessageDispatcher<ServerMessage>>,
     dispatcher_receiver: Option<Receiver<ServerMessage>>,
     dispatcher_sender: Option<Sender<ServerMessage>>,
+    /// Operations held until a successful login. Connection establishment does
+    /// not drain this; `handle_login_status(true)` does.
     queued_messages: Vec<ServerMessage>,
+    /// The single frame that opens a new server session.
+    login_frame: Option<Message>,
+    post_login_ready: bool,
     shared_folder_count: u32,
     shared_file_count: u32,
     session: SessionWatch,
@@ -338,6 +343,8 @@ impl ServerActor {
             client_channel,
             self_handle: None,
             queued_messages: Vec::new(),
+            login_frame: None,
+            post_login_ready: false,
             shared_folder_count,
             shared_file_count,
             session: SessionWatch::default(),
@@ -556,15 +563,38 @@ impl ServerActor {
         }
     }
 
+    /// Frames that only belong on a logged-in session. Until the verdict
+    /// arrives they are held, never written to the socket.
+    const fn is_outbound(message: &ServerMessage) -> bool {
+        matches!(
+            message,
+            ServerMessage::SendMessage(_)
+                | ServerMessage::PierceFirewall(_)
+                | ServerMessage::GetPeerAddress(_)
+                | ServerMessage::FileSearch { .. }
+                | ServerMessage::WishlistSearch { .. }
+                | ServerMessage::CheckPrivileges
+        )
+    }
+
     fn queue_message(&mut self, message: Message) {
-        if let Some(sender) = &self.dispatcher_sender {
-            match sender.send(ServerMessage::SendMessage(message)) {
-                Ok(()) => {}
-                Err(e) => error!("Failed to send: {}", e),
+        let frame = ServerMessage::SendMessage(message);
+        if self.post_login_ready && let Some(sender) = &self.dispatcher_sender {
+            if let Err(e) = sender.send(frame) {
+                error!("Failed to send: {}", e);
             }
         } else {
-            self.queued_messages
-                .push(ServerMessage::SendMessage(message));
+            self.queued_messages.push(frame);
+        }
+    }
+
+    /// Login is the one frame allowed to open a new session, so it has its own
+    /// slot rather than sitting behind operations queued while we were down.
+    fn queue_login(&mut self, message: Message) {
+        if matches!(self.connection_state, ConnectionState::Connected) {
+            self.send_message(message);
+        } else {
+            self.login_frame = Some(message);
         }
     }
 
@@ -630,7 +660,10 @@ impl ServerActor {
         self.dispatcher = None;
         self.dispatcher_sender = None;
         self.dispatcher_receiver = None;
-        self.queued_messages.clear();
+        // A login for a dead socket is stale, but operations waiting for the
+        // next session must survive a failed reconnect.
+        self.login_frame = None;
+        self.post_login_ready = false;
         self.reader = MessageReader::new();
         if let Ok(mut ctx) = self.context.write_safe() {
             ctx.logged_in = None;
@@ -669,10 +702,11 @@ impl ServerActor {
     fn on_connection_established(&mut self) {
         self.initialize_dispatcher();
 
-        let queued = std::mem::take(&mut self.queued_messages);
-        for msg in queued {
-            self.handle_message(msg);
+        if let Some(login) = self.login_frame.take() {
+            self.send_message(login);
         }
+        // queued_messages is a post-login replay buffer: draining it here
+        // would put peer operations ahead of Login on a fresh socket.
 
         if let Some(ref handle) = self.self_handle {
             handle.send(ServerMessage::ProcessRead).ok();
