@@ -767,6 +767,22 @@ mod tests {
     }
 
     #[test]
+    fn dropping_the_test_listener_stops_accepting_connections() {
+        let address = {
+            let server = serve_on_port_zero("secret");
+            // The accept loop is ready before the guard goes out of scope.
+            let mut stream = connect(server.address);
+            let reply = authenticate(&mut stream, "secret");
+            assert!(reply.contains("\"result\""), "{reply}");
+            server.address
+        };
+        assert!(
+            std::net::TcpStream::connect(address).is_err(),
+            "the listener thread must end with its owner"
+        );
+    }
+
+    #[test]
     fn an_unknown_method_is_reported_rather_than_ignored() {
         let daemon = daemon_with_token("t");
         let response = answer(
