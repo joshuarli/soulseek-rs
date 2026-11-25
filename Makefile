@@ -13,6 +13,7 @@ build:
 test:
 	@mkdir -p .work/tmp
 	TMPDIR="$(CURDIR)/.work/tmp" $(call cargo,test) test --quiet
+	TMPDIR="$(CURDIR)/.work/tmp" $(call cargo,test) test -p soulseek-rs --features fixtures --test tui_snapshots --quiet
 
 check:
 	@mkdir -p .work/tmp

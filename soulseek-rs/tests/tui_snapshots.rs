@@ -198,7 +198,7 @@ fn populated_window_matches_the_recorded_frames() {
     // The restored, completed search brings its results into the pane.
     press(&mut terminal, Key::Down);
     press(&mut terminal, Key::Enter);
-    wait_for(&mut terminal, "Pulsewidth");
+    wait_for(&mut terminal, "Bitrate");
     freeze(&terminal, "results-120x40");
 
     type_text(&mut terminal, "?");
@@ -268,7 +268,7 @@ fn narrow_window_still_fits() {
 fn tiny_window_renders_without_content_rows() {
     let (mut terminal, baseline) = start("tui-tiny", 40, 12);
 
-    wait_for(&mut terminal, "Status");
+    wait_for(&mut terminal, "Results");
     freeze(&terminal, "main-40x12");
 
     quit(&mut terminal, &baseline);
@@ -282,7 +282,7 @@ fn wide_window_keeps_the_columns() {
     freeze(&terminal, "main-200x60");
     press(&mut terminal, Key::Down);
     press(&mut terminal, Key::Enter);
-    wait_for(&mut terminal, "Pulsewidth");
+    wait_for(&mut terminal, "Bitrate");
     freeze(&terminal, "results-200x60");
 
     quit(&mut terminal, &baseline);
