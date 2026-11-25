@@ -1,14 +1,87 @@
 use crate::types::{Download, DownloadStatus};
+use crate::utils::path::expand_tilde;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// Written beside the staging bytes so an interrupted transfer can prove the
+/// bytes belong to it before resuming.
+pub const STAGING_IDENTITY_SUFFIX: &str = ".identity";
+
+pub fn extract_filename_from_path(full_path: &str) -> &str {
+    full_path
+        .split(['/', '\\'])
+        .next_back()
+        .unwrap_or(full_path)
+}
+
+/// The local file a download installs into. Shared with staging so the
+/// reservation cannot disagree with the bytes being written.
+pub fn output_path_of(download: &Download) -> Option<PathBuf> {
+    let mut directory = expand_tilde(&download.download_directory);
+    if directory.is_file() {
+        directory = directory.parent()?.to_path_buf();
+    }
+    Some(directory.join(extract_filename_from_path(&download.filename)))
+}
+
+/// A durable identity for a transfer's bytes: owner, full virtual path and
+/// advertised size. Length prefixes keep any character in a username or path
+/// from blurring the fields, and the whole string is stored verbatim beside
+/// the staging file so a resume is a comparison, never a guess.
+pub fn identity_of(download: &Download) -> String {
+    format!(
+        "v1\t{}\t{}:{}\t{}:{}",
+        download.size,
+        download.username.len(),
+        download.username,
+        download.filename.len(),
+        download.filename
+    )
+}
 
 #[derive(Default)]
 pub struct DownloadStore {
     downloads: Vec<Download>,
+    output_reservations: HashMap<PathBuf, String>,
 }
 
 impl DownloadStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reserve a final output path for this transfer. A different identity
+    /// cannot hold the same path while this one is live, however alike the
+    /// remote basenames are.
+    pub fn reserve_output(&mut self, download: &Download) -> bool {
+        let Some(path) = output_path_of(download) else {
+            return false;
+        };
+        let identity = identity_of(download);
+        match self.output_reservations.get(&path) {
+            Some(owner) if owner != &identity => false,
+            _ => {
+                self.output_reservations.insert(path, identity);
+                true
+            }
+        }
+    }
+
+    /// Reservations are derived from the live rows, so a token migration or a
+    /// terminal status releases the path without a separate bookkeeping path.
+    fn rebuild_reservations(&mut self) {
+        self.output_reservations.clear();
+        for download in &self.downloads {
+            if download.is_finished() {
+                continue;
+            }
+            if let Some(path) = output_path_of(download) {
+                self.output_reservations
+                    .entry(path)
+                    .or_insert_with(|| identity_of(download));
+            }
+        }
     }
 
     pub fn add(&mut self, download: Download) {
@@ -18,10 +91,12 @@ impl DownloadStore {
                 && d.filename == download.filename)
         });
         self.downloads.push(download);
+        self.rebuild_reservations();
     }
 
     pub fn remove(&mut self, token: u32) {
         self.downloads.retain(|d| d.token != token);
+        self.rebuild_reservations();
     }
 
     #[must_use]
@@ -88,6 +163,7 @@ impl DownloadStore {
             return false;
         }
         download.status = status;
+        self.rebuild_reservations();
         true
     }
 
@@ -126,7 +202,9 @@ impl DownloadStore {
         }
         download.status = DownloadStatus::Cancelled;
         let _ = download.sender.send(DownloadStatus::Cancelled);
-        Some(download.clone())
+        let cancelled = download.clone();
+        self.rebuild_reservations();
+        Some(cancelled)
     }
 
     pub fn update_queue_position(
@@ -156,6 +234,7 @@ impl DownloadStore {
         };
 
         self.downloads.remove(index);
+        self.rebuild_reservations();
         true
     }
 
@@ -167,7 +246,11 @@ impl DownloadStore {
         let before = self.downloads.len();
         self.downloads
             .retain(|d| !(d.username == username && d.filename == filename));
-        self.downloads.len() != before
+        let removed = self.downloads.len() != before;
+        if removed {
+            self.rebuild_reservations();
+        }
+        removed
     }
 
     pub fn pause_by_file(&mut self, username: &str, filename: &str) -> bool {
@@ -276,6 +359,50 @@ mod tests {
         store.remove(123);
         assert!(store.get_by_token(123).is_none());
         assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn two_peers_with_the_same_basename_cannot_hold_one_output_path() {
+        let mut store = DownloadStore::new();
+        let mut first = make_download(1, DownloadStatus::Queued);
+        first.filename = "album-a\\01.mp3".into();
+        let mut second = make_download(2, DownloadStatus::Queued);
+        second.username = "other".into();
+        second.filename = "album-b\\01.mp3".into();
+
+        store.add(first.clone());
+        store.add(second.clone());
+        assert!(store.reserve_output(&first));
+        assert!(
+            !store.reserve_output(&second),
+            "both resolve to 01.mp3, so only one live transfer may own it"
+        );
+        assert!(
+            store.reserve_output(&first),
+            "the owning transfer may re-reserve its own path"
+        );
+
+        assert!(store.update_status(1, DownloadStatus::Completed));
+        assert!(
+            store.reserve_output(&second),
+            "completion releases the path for the next download"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_download_releases_its_output_path() {
+        let mut store = DownloadStore::new();
+        let first = make_download(1, DownloadStatus::Queued);
+        let mut second = make_download(2, DownloadStatus::Queued);
+        second.username = "other".into();
+        second.filename = first.filename.clone();
+
+        assert!(store.reserve_output(&first));
+        store.add(first);
+        assert!(!store.reserve_output(&second));
+
+        assert!(store.cancel_by_file("peer", "file-1.mp3").is_some());
+        assert!(store.reserve_output(&second));
     }
 
     #[test]

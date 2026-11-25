@@ -1,15 +1,6 @@
 Prefix: SOUL
 Next: 23
 
-### SOUL-11 · P1 · Same-basename downloads can concatenate or overwrite unrelated partial files
-
-- **Area:** Downloads and durable state
-- **Where:** soulseek-rs-lib/src/peer/download_peer.rs:74-89,91-115,146-156,199-200; soulseek-rs-lib/src/client/downloads.rs:122-143; soulseek-rs-lib/src/download_store.rs:14-20,94-115
-- **Problem:** A local output path is only the configured directory plus the remote basename. Any shorter existing .part is trusted as a prefix even though username, full remote path, and prior size are not persisted, and live downloads are keyed by token rather than output path. Two files named the same from different folders or peers can therefore append into one .part, truncate each other, race the final rename, or promote mixed bytes as a completed download. The deterministic witness is a four-byte prefix from album-a\01.mp3 resumed as album-b\01.mp3 with a larger size: the length check passes while the content is mixed. Proven by the path and append logic; no network reproduction was run.
-- **Recommendation:** Give transfer staging a durable identity and make output installation explicit: reserve each final output path while live, record at least username, full virtual path, and expected size beside or within the staging name, refuse unidentified legacy partials or migrate them deliberately, and choose a no-clobber or unique-name final-install policy. Add regression tests for cross-peer same-basename concurrency and stale partial reuse.
-- **Fix with:** durable-state
-- **Effort:** M
-
 ### SOUL-12 · P1 · Reconnect replay can write operations before login or silently erase them
 
 - **Area:** Server session recovery

@@ -2,16 +2,19 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::client::ClientContext;
+use crate::download_store::{
+    STAGING_IDENTITY_SUFFIX, identity_of, output_path_of,
+};
 use crate::message::server::MessageFactory;
 use crate::trace;
 use crate::types::{Download, DownloadStatus};
-use crate::utils::path::{PART_SUFFIX, expand_tilde};
+use crate::utils::path::PART_SUFFIX;
 
 /// Read in 64 KiB slices: an eighth of the syscalls of the 8 KiB reads before,
 /// and what a fast peer fills per read. slskd reads 256 KiB, Nicotine+ ~50 KiB.
@@ -71,13 +74,6 @@ impl std::fmt::Display for DownloadError {
 
 impl std::error::Error for DownloadError {}
 
-fn extract_filename_from_path(full_path: &str) -> &str {
-    full_path
-        .split(['/', '\\'])
-        .next_back()
-        .unwrap_or(full_path)
-}
-
 fn part_path(final_path: &str) -> String {
     format!("{final_path}{PART_SUFFIX}")
 }
@@ -96,22 +92,12 @@ pub fn part_path_of(download: &Download) -> Option<String> {
 /// made a daemon whose folder was never created download into `~/Downloads`
 /// while reporting `~/Downloads/Soulseek`.
 fn resolve_download_path(download: &Download) -> Result<String, DownloadError> {
-    let mut expanded_path = expand_tilde(&download.download_directory);
-
-    if expanded_path.is_file() {
-        expanded_path = expanded_path
-            .parent()
-            .ok_or_else(|| {
-                DownloadError::PathResolutionError(format!(
-                    "Cannot resolve parent directory for: {}",
-                    expanded_path.display()
-                ))
-            })?
-            .to_path_buf();
-    }
-
-    let final_path =
-        expanded_path.join(extract_filename_from_path(&download.filename));
+    let final_path = output_path_of(download).ok_or_else(|| {
+        DownloadError::PathResolutionError(format!(
+            "Cannot resolve parent directory for: {}",
+            download.download_directory
+        ))
+    })?;
 
     final_path
         .to_str()
@@ -126,9 +112,13 @@ fn resolve_download_path(download: &Download) -> Result<String, DownloadError> {
 
 /// The `.part` file a transfer streams into, so an interrupted transfer leaves
 /// behind what it managed to fetch and the next attempt can pick up from there.
+/// A sidecar records the identity of the bytes; without a match the file is
+/// migrated aside rather than appended to.
 struct PartFile {
     file: File,
     final_path: String,
+    part_path: PathBuf,
+    identity_path: PathBuf,
     written: u64,
     expected: u64,
 }
@@ -136,32 +126,128 @@ struct PartFile {
 impl PartFile {
     fn open(download: &Download) -> Result<Self, DownloadError> {
         let final_path = resolve_download_path(download)?;
-        let path = PathBuf::from(part_path(&final_path));
+        let part_path = PathBuf::from(part_path(&final_path));
+        let identity_path = PathBuf::from(format!(
+            "{}{STAGING_IDENTITY_SUFFIX}",
+            part_path.display()
+        ));
 
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = part_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(DownloadError::FileWriteError)?;
         }
 
-        // A `.part` at or beyond the advertised size is restarted. We do not
-        // persist its username, full remote path, or prior expected size, so
-        // equality alone cannot prove that its bytes belong to this transfer.
-        let on_disk = fs::metadata(&path).map_or(0, |m| m.len());
-        let written = if on_disk < download.size { on_disk } else { 0 };
+        let identity = identity_of(download);
+        let recognised = fs::read_to_string(&identity_path).ok().as_deref()
+            == Some(identity.as_str());
+        let on_disk = fs::metadata(&part_path).map_or(0, |m| m.len());
+        let written = if recognised && on_disk < download.size {
+            on_disk
+        } else {
+            0
+        };
+
+        if !recognised && on_disk > 0 {
+            Self::migrate_unidentified_part(&part_path, &identity_path)?;
+        }
 
         let file = if written > 0 {
-            OpenOptions::new().append(true).open(&path)
+            OpenOptions::new().append(true).open(&part_path)
         } else {
-            File::create(&path)
+            File::create(&part_path)
         }
         .map_err(DownloadError::FileWriteError)?;
+        fs::write(&identity_path, identity).map_err(DownloadError::FileWriteError)?;
 
         Ok(Self {
             file,
             final_path,
+            part_path,
+            identity_path,
             written,
             expected: download.size,
         })
+    }
+
+    /// Preserve bytes we cannot attribute instead of mixing them into a new
+    /// transfer. The `.legacy` name is never opened as a resume point.
+    fn migrate_unidentified_part(
+        part_path: &Path,
+        identity_path: &Path,
+    ) -> Result<(), DownloadError> {
+        let base = format!("{}.legacy", part_path.display());
+        for number in 1..u32::MAX {
+            let legacy = if number == 1 {
+                PathBuf::from(&base)
+            } else {
+                PathBuf::from(format!("{base}.{number}"))
+            };
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&legacy)
+            {
+                Ok(placeholder) => {
+                    drop(placeholder);
+                    if let Err(error) = fs::rename(part_path, &legacy) {
+                        let _ = fs::remove_file(&legacy);
+                        return Err(DownloadError::FileWriteError(error));
+                    }
+                    if identity_path.exists() {
+                        let legacy_identity = PathBuf::from(format!(
+                            "{}{STAGING_IDENTITY_SUFFIX}",
+                            legacy.display()
+                        ));
+                        fs::rename(identity_path, legacy_identity)
+                            .map_err(DownloadError::FileWriteError)?;
+                    }
+                    return Ok(());
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(DownloadError::FileWriteError(e)),
+            }
+        }
+        Err(DownloadError::FileWriteError(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no free legacy name",
+        )))
+    }
+
+    /// Claim a free final name with `create_new`: an existence check followed
+    /// by a rename could overwrite a file another process created in between.
+    fn claim_install_path(final_path: &Path) -> Result<PathBuf, DownloadError> {
+        let stem = final_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let extension = final_path
+            .extension()
+            .map(|ext| format!(".{}", ext.to_string_lossy()))
+            .unwrap_or_default();
+        let parent = final_path.parent().unwrap_or_else(|| Path::new(""));
+        for number in 1..u32::MAX {
+            let candidate = if number == 1 {
+                final_path.to_path_buf()
+            } else {
+                parent.join(format!("{stem} ({number}){extension}"))
+            };
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(placeholder) => {
+                    drop(placeholder);
+                    return Ok(candidate);
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(DownloadError::FileWriteError(e)),
+            }
+        }
+        Err(DownloadError::FileWriteError(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no free install name",
+        )))
     }
 
     /// Peers can coalesce trailing bytes into the last chunk, so overshoot past
@@ -183,7 +269,8 @@ impl PartFile {
 
     fn discard(self) {
         drop(self.file);
-        let _ = fs::remove_file(part_path(&self.final_path));
+        let _ = fs::remove_file(&self.part_path);
+        let _ = fs::remove_file(&self.identity_path);
     }
 
     /// A short transfer is a failure, and the `.part` stays put so the next
@@ -196,9 +283,13 @@ impl PartFile {
             });
         }
         drop(self.file);
-        fs::rename(part_path(&self.final_path), &self.final_path)
-            .map_err(DownloadError::FileWriteError)?;
-        Ok(self.final_path)
+        let destination = Self::claim_install_path(Path::new(&self.final_path))?;
+        if let Err(error) = fs::rename(&self.part_path, &destination) {
+            let _ = fs::remove_file(&destination);
+            return Err(DownloadError::FileWriteError(error));
+        }
+        let _ = fs::remove_file(&self.identity_path);
+        Ok(destination.to_string_lossy().into_owned())
     }
 }
 
@@ -613,10 +704,9 @@ impl DownloadPeer {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DownloadError, DownloadPeer, PartFile, extract_filename_from_path,
-    };
+    use super::{DownloadError, DownloadPeer, PartFile};
     use crate::client::ClientContext;
+    use crate::download_store::extract_filename_from_path;
     use crate::types::{Download, DownloadMetadata, DownloadStatus};
     use std::sync::{Arc, RwLock, mpsc};
 
@@ -898,10 +988,13 @@ mod tests {
     #[test]
     fn a_partial_file_sets_the_resume_offset() {
         let dir = scratch_dir("resume");
-        std::fs::write(dir.join("file.bin.part"), b"0123").unwrap();
+        {
+            let mut part = PartFile::open(&download_into(&dir, 10)).unwrap();
+            part.write(b"0123").unwrap();
+        }
 
         let mut part = PartFile::open(&download_into(&dir, 10)).unwrap();
-        assert_eq!(part.written, 4, "resume from what is already on disk");
+        assert_eq!(part.written, 4, "resume from this transfer's own bytes");
 
         part.write(b"456789").unwrap();
         let final_path = part.finish().unwrap();
@@ -916,8 +1009,8 @@ mod tests {
 
     #[test]
     fn an_unidentified_exact_size_partial_restarts_from_zero() {
-        // With no persisted transfer identity, length alone cannot distinguish
-        // a final write awaiting rename from unrelated same-sized content.
+        // A part with no identity sidecar is never a valid resume point,
+        // whatever its length happens to be.
         let dir = scratch_dir("complete");
         std::fs::write(dir.join("file.bin.part"), b"0123456789").unwrap();
 
@@ -1072,5 +1165,96 @@ mod tests {
             "michel test file.mp3"
         );
         assert_eq!(extract_filename_from_path("file.mp3"), "file.mp3");
+    }
+
+    #[test]
+    fn a_partial_recorded_for_another_transfer_is_never_appended() {
+        // The witness: album-a\01.mp3 leaves a four-byte prefix, then
+        // album-b\01.mp3 advertises a larger size. The old length check
+        // accepted the prefix and mixed two unrelated files' bytes.
+        let dir = scratch_dir("cross-path");
+        let mut first = download_into(&dir, 10);
+        first.username = "alice".into();
+        first.filename = "album-a\\01.mp3".into();
+        let mut part = PartFile::open(&first).unwrap();
+        part.write(b"abcd").unwrap();
+        drop(part);
+
+        let mut second = download_into(&dir, 20);
+        second.username = "bob".into();
+        second.filename = "album-b\\01.mp3".into();
+        let resumed = PartFile::open(&second).unwrap();
+
+        assert_eq!(
+            resumed.written, 0,
+            "a different username and virtual path must not resume these bytes"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("01.mp3.part.legacy")).unwrap(),
+            b"abcd",
+            "the stale bytes are migrated aside, not overwritten"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unidentified_partial_is_migrated_instead_of_resumed() {
+        let dir = scratch_dir("legacy");
+        std::fs::write(dir.join("file.bin.part"), b"abcd").unwrap();
+
+        let part = PartFile::open(&download_into(&dir, 20)).unwrap();
+
+        assert_eq!(part.written, 0, "an unidentified part is not a resume point");
+        assert_eq!(
+            std::fs::read(dir.join("file.bin.part.legacy")).unwrap(),
+            b"abcd",
+            "the bytes survive under a name that cannot be resumed by mistake"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_unidentified_partials_keep_every_migrated_copy() {
+        let dir = scratch_dir("legacy-twice");
+        std::fs::write(dir.join("file.bin.part"), b"first").unwrap();
+        drop(PartFile::open(&download_into(&dir, 20)).unwrap());
+
+        let _ = std::fs::remove_file(dir.join("file.bin.part.identity"));
+        std::fs::write(dir.join("file.bin.part"), b"second").unwrap();
+        drop(PartFile::open(&download_into(&dir, 20)).unwrap());
+
+        let saved: Vec<Vec<u8>> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().contains(".legacy")
+            })
+            .map(|entry| std::fs::read(entry.path()).unwrap())
+            .collect();
+        assert!(
+            saved.contains(&b"first".to_vec()),
+            "the first migrated copy must survive a later migration"
+        );
+        assert!(saved.contains(&b"second".to_vec()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_never_clobbers_an_existing_final_file() {
+        let dir = scratch_dir("no-clobber");
+        std::fs::write(dir.join("file.bin"), b"keep").unwrap();
+        let mut part = PartFile::open(&download_into(&dir, 4)).unwrap();
+        part.write(b"data").unwrap();
+
+        let installed = part.finish().unwrap();
+
+        assert_eq!(std::fs::read(dir.join("file.bin")).unwrap(), b"keep");
+        assert_ne!(
+            installed,
+            dir.join("file.bin").to_str().unwrap(),
+            "the new download gets a unique name"
+        );
+        assert_eq!(std::fs::read(&installed).unwrap(), b"data");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

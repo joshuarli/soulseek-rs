@@ -3,6 +3,7 @@ use super::{
     Receiver, Result, RwLock, RwLockExt, Sender, error, info, mpsc,
     next_download_token,
 };
+use crate::download_store::STAGING_IDENTITY_SUFFIX;
 use crate::peer::part_path_of;
 
 impl Client {
@@ -55,7 +56,10 @@ impl Client {
             return false;
         };
         if let Some(part) = part_path_of(&download) {
-            let _ = std::fs::remove_file(part);
+            let _ = std::fs::remove_file(&part);
+            let _ = std::fs::remove_file(format!(
+                "{part}{STAGING_IDENTITY_SUFFIX}"
+            ));
         }
         true
     }
@@ -139,6 +143,14 @@ impl Client {
         };
 
         let mut context = self.context.write_safe()?;
+        if !context.downloads.reserve_output(&download) {
+            drop(context);
+            let reason = "Another live download is already writing this file";
+            let _ = download
+                .sender
+                .send(DownloadStatus::Failed(Some(reason.to_string())));
+            return Ok((download, download_receiver));
+        }
         context.add_download(download.clone());
 
         // If we already have a control connection to this peer, queue the
