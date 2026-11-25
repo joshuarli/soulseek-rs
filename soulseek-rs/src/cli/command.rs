@@ -374,6 +374,17 @@ pub const LISTENER_PORT: OptionSpec = with_env(
     "SOULSEEK_LISTENER_PORT",
 );
 
+pub const PORT_MAPPING: OptionSpec = with_env(
+    value(
+        None,
+        "port-mapping",
+        "POLICY",
+        ValueKind::Text,
+        "Router mapping: off (default), auto (UPnP then NAT-PMP), upnp, or natpmp",
+    ),
+    "SOULSEEK_PORT_MAPPING",
+);
+
 pub const DOWNLOAD_DIR: OptionSpec = with_env(
     value(
         Some('d'),
@@ -499,6 +510,7 @@ pub const GLOBAL_OPTIONS: &[OptionSpec] = &[
     NO_LISTENER,
     LISTENER,
     LISTENER_PORT,
+    PORT_MAPPING,
     DOWNLOAD_DIR,
     SHARED_DIR,
     MAX_CONCURRENT_DOWNLOADS,
@@ -646,7 +658,7 @@ pub fn root_spec() -> CommandSpec {
         .subcommand(command(
             CommandId::Portmap,
             "portmap",
-            "Check whether the router opens the listen port (UPnP/NAT-PMP)",
+            "Actively create and remove a temporary router mapping for the listen port (UPnP then NAT-PMP); independent of session mapping policy",
         ))
         .subcommand(skills::spec())
         .subcommand(completions::spec())

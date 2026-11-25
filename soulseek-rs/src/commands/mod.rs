@@ -20,7 +20,7 @@ use crate::cli::{
     AccountCommand, Commands, MessageCommand, RoomCommand, TransferCommand,
 };
 use crate::output::{CliError, CliResult, Exit, Out, PortmapRecord};
-use crate::port_mapping::{self, PortMapper};
+use crate::port_mapping::{self, MappingPolicy, PortMapper};
 use crate::remote::{Endpoint, RemoteSession};
 use soulseek_rs::types::{RoomEvent, RoomInfo};
 use soulseek_rs::{Client, ClientSettings, SessionLoss};
@@ -38,6 +38,9 @@ pub struct Ctx {
     pub use_username_dirs: bool,
     pub max_concurrent_downloads: usize,
     pub search_timeout: Duration,
+    /// Router mapping policy for a session this run opens itself. Attaching
+    /// clients never map: the daemon owns the listener and its mapping.
+    pub port_mapping: MappingPolicy,
     /// Where to find a daemon, when this run should use one rather than open
     /// its own session. Resolved once in `main`, so every command agrees.
     pub daemon: Option<Endpoint>,
@@ -96,8 +99,8 @@ fn session_lost(loss: SessionLoss) -> CliError {
     ))
 }
 
-/// A logged-in client plus, while the listener is enabled, the port mapping
-/// that makes us reachable. Both live until the command ends.
+/// A logged-in client plus, when explicitly opted in, the router mapping that
+/// makes us reachable. Both live until the command ends.
 pub struct Session {
     pub client: Arc<dyn SessionApi>,
     _mapper: Option<PortMapper>,
@@ -168,8 +171,10 @@ impl Session {
 
         // Ask the router for the port the listener actually holds: when the
         // configured one was taken, mapping it would open a hole to whoever
-        // did take it.
-        let mapper = bound.map(PortMapper::spawn);
+        // did take it. `off` spawns nothing at all.
+        let mapper = bound.and_then(|port| {
+            PortMapper::spawn(port, ctx.port_mapping)
+        });
 
         Ok(Self {
             client,

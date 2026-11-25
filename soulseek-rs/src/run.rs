@@ -94,7 +94,8 @@ fn dispatch(mut cli: Cli, out: &Out) -> CliResult {
             .map_err(|e| CliError::usage(e.to_string()))?,
         None => crate::persist::config::FileConfig::default(),
     };
-    let resolved = crate::persist::config::resolve(&cli, &file_config);
+    let resolved = crate::persist::config::resolve(&cli, &file_config)
+        .map_err(CliError::usage)?;
 
     let Some(command) = cli.command.take() else {
         // Without a terminal the TUI would panic on its first draw. A script
@@ -324,6 +325,7 @@ fn context(
         use_username_dirs: resolved.use_username_dirs,
         max_concurrent_downloads: resolved.max_concurrent_downloads,
         search_timeout: Duration::from_secs(resolved.search_timeout),
+        port_mapping: resolved.port_mapping,
         daemon,
         daemon_token: resolved.daemon_token.clone(),
         session: std::sync::OnceLock::new(),
@@ -547,12 +549,16 @@ fn run_default_tui(
         persist_credentials(&outcome, config_path.as_deref(), &secret_store);
         username = Some(outcome.username.clone());
 
-        // Best-effort: make ourselves reachable behind a home router so
-        // firewalled peers can connect back. Mapped only once the listener is
-        // up, and for the port it really bound. Kept alive for the session.
+        // Only when explicitly opted in: map the port the listener really
+        // bound, so an occupied configured port cannot open someone else's
+        // hole. Kept alive for this session; `off` starts no worker at all.
         let bound_port = outcome.client.listen_port();
-        let _port_mapper =
-            bound_port.map(crate::port_mapping::PortMapper::spawn);
+        let _port_mapper = bound_port.and_then(|port| {
+            crate::port_mapping::PortMapper::spawn(
+                port,
+                resolved.port_mapping,
+            )
+        });
 
         let store = crate::persist::paths::state_dir()
             .map(crate::persist::state::StateStore::new);

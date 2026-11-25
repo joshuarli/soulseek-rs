@@ -81,6 +81,7 @@ pub struct Cli {
     pub no_listener: bool,
     pub listener: bool,
     pub listener_port: Option<u16>,
+    pub port_mapping: Option<String>,
     pub download_dir: Option<String>,
     pub shared_dir: Vec<String>,
     pub max_concurrent_downloads: Option<usize>,
@@ -111,6 +112,7 @@ impl Cli {
             no_listener: parsed.flag(&command::NO_LISTENER),
             listener: parsed.flag(&command::LISTENER),
             listener_port: parsed.u16(&command::LISTENER_PORT)?,
+            port_mapping: parsed.value(&command::PORT_MAPPING)?,
             download_dir: parsed.value(&command::DOWNLOAD_DIR)?,
             shared_dir: parsed.values(&command::SHARED_DIR)?,
             max_concurrent_downloads: parsed
@@ -347,6 +349,16 @@ mod tests {
         let cli =
             parsed(&["soulseek-rs", "--shared-dir", "/a", "--shared-dir", "/b"]);
         assert_eq!(cli.shared_dir, vec!["/a".to_string(), "/b".to_string()]);
+    }
+
+    #[test]
+    fn port_mapping_flag_and_environment_are_layered() {
+        let cli = parsed(&["soulseek-rs", "--port-mapping", "upnp", "portmap"]);
+        assert_eq!(cli.port_mapping.as_deref(), Some("upnp"));
+        assert_eq!(
+            parsed(&["soulseek-rs", "whoami"]).port_mapping,
+            None
+        );
     }
 
     #[test]

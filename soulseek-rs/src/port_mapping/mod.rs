@@ -1,17 +1,20 @@
-//! Best-effort automatic port mapping so a client behind a home router becomes
-//! reachable for incoming peer connections (browse/download of firewalled peers
-//! and the server-brokered connect-back both need this).
+//! Optional, policy-controlled port mapping so a client behind a home router
+//! can become reachable for incoming peer connections (browse/download of
+//! firewalled peers and the server-brokered connect-back both need this).
 //!
-//! Tries UPnP-IGD (via the `igd-next` crate) first, then hand-rolled NAT-PMP
-//! (see [`nat_pmp`]). Everything is best-effort: any failure is logged and the
-//! program continues (the user can still reach non-firewalled peers, and can
-//! port-forward manually). The mapping is renewed on a timer and removed on
-//! shutdown.
+//! Mapping is OFF by default: nothing here is contacted unless the user opts
+//! in. [`MappingPolicy::Auto`] tries UPnP-IGD first and then NAT-PMP; the other
+//! values select exactly one backend and never contact the other. Everything
+//! remains best-effort: a failure is logged and the program continues (the
+//! user can still reach non-firewalled peers, and can forward a port manually).
+//! Mappings are finite leases, renewed on a timer and removed on shutdown.
 
 mod igd;
 mod nat_pmp;
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -27,6 +30,60 @@ const LEASE_SECS: u32 = nat_pmp::RECOMMENDED_LIFETIME;
 /// Interactive NAT-PMP retransmit budget (~3.75s worst case), not the full 9.
 const NATPMP_ATTEMPTS: u32 = 4;
 
+/// Which router-mapping backends a session is allowed to contact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MappingPolicy {
+    /// Never discover or map anything. The default.
+    #[default]
+    Off,
+    /// UPnP-IGD first, NAT-PMP only if UPnP did not produce a mapping.
+    Auto,
+    /// UPnP-IGD only.
+    Upnp,
+    /// NAT-PMP only.
+    Natpmp,
+}
+
+impl MappingPolicy {
+    /// The backends this policy may contact, in order.
+    #[must_use]
+    pub const fn backends(self) -> &'static [Self] {
+        match self {
+            Self::Off => &[],
+            Self::Auto => &[Self::Upnp, Self::Natpmp],
+            Self::Upnp => &[Self::Upnp],
+            Self::Natpmp => &[Self::Natpmp],
+        }
+    }
+}
+
+impl fmt::Display for MappingPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Upnp => "upnp",
+            Self::Natpmp => "natpmp",
+        })
+    }
+}
+
+impl FromStr for MappingPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "false" | "no" => Ok(Self::Off),
+            "auto" | "on" | "true" | "yes" => Ok(Self::Auto),
+            "upnp" => Ok(Self::Upnp),
+            "natpmp" | "nat-pmp" => Ok(Self::Natpmp),
+            other => Err(format!(
+                "port_mapping does not accept '{other}'; use one of: off, auto, upnp, natpmp"
+            )),
+        }
+    }
+}
+
 /// A live port mapping and its renewal thread. Dropping it stops renewal and
 /// removes the mapping (best-effort).
 pub struct PortMapper {
@@ -35,20 +92,26 @@ pub struct PortMapper {
 }
 
 impl PortMapper {
-    /// Spawn a background best-effort mapper for TCP `port`. Returns immediately;
-    /// discovery/mapping happens on the thread so startup never blocks.
+    /// Spawn a background mapper for TCP `port`, or return `None` when mapping
+    /// is off. Discovery/mapping happens on the thread so startup never blocks.
+    ///
+    /// `port` must be the port the listener actually bound, not the configured
+    /// one: mapping an occupied port would forward traffic to another process.
     #[must_use]
-    pub fn spawn(port: u16) -> Self {
+    pub fn spawn(port: u16, policy: MappingPolicy) -> Option<Self> {
+        if policy == MappingPolicy::Off {
+            return None;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let (done_tx, done) = mpsc::channel();
         let _ = thread::Builder::new().name("port-mapper".into()).spawn(
             move || {
-                run(port, &thread_stop);
+                run(port, policy, &thread_stop);
                 let _ = done_tx.send(());
             },
         );
-        Self { stop, done }
+        Some(Self { stop, done })
     }
 }
 
@@ -75,23 +138,17 @@ pub struct Probe {
 }
 
 /// Synchronously probe whether automatic port mapping works on this network:
-/// try to map `port` (UPnP then NAT-PMP), then remove the probe mapping.
-/// Backs the `portmap` command so a user can verify reachability on their
-/// actual router.
+/// actively map `port` (UPnP then NAT-PMP) and then remove the probe mapping.
+/// Backs the explicit `portmap` diagnostic; unlike a session, it is not
+/// governed by the session's mapping policy and always tries both backends.
 #[must_use]
 pub fn probe(port: u16) -> Probe {
-    let Some(local_ip) = local_lan_ip() else {
-        return Probe {
-            ok: false,
-            backend: "none",
-            external: None,
-            advice: "Could not determine this machine's LAN IP — are you \
-                     connected to a network?"
-                .to_string(),
-        };
-    };
+    let local_ip = local_lan_ip();
+    if local_ip.is_none() {
+        info("no LAN IP for UPnP; probe will only try NAT-PMP");
+    }
 
-    match map_once(local_ip, port) {
+    match map_once(local_ip, port, MappingPolicy::Auto) {
         Some((backend, _lease)) => {
             let (name, external) = match &backend {
                 Backend::Upnp { gateway, .. } => (
@@ -109,9 +166,10 @@ pub fn probe(port: u16) -> Probe {
                 backend: name,
                 external,
                 advice: format!(
-                    "Automatic port mapping works. TCP {port} was opened on \
+                    "Automatic port mapping works. This probe created and then removed a TCP {port} mapping on \
                      your router, so firewalled peers and the server can \
-                     reach you. The app does this automatically while it runs."
+                     reach you. Sessions only do this when port_mapping is set to auto, upnp or \
+                      natpmp (off by default)."
                 ),
             }
         }
@@ -141,27 +199,48 @@ enum Backend {
     NatPmp {
         gateway: SocketAddr,
         internal_port: u16,
+        /// Granted lifetime in seconds. Zero means permanent and is rejected
+        /// before a mapping is kept.
+        lease: u32,
     },
 }
 
-fn run(port: u16, stop: &AtomicBool) {
-    let Some(local_ip) = local_lan_ip() else {
-        warn(
-            "could not determine this machine's LAN IP; skipping automatic \
-              port mapping (you may need to forward the port manually)",
-        );
+fn run(port: u16, policy: MappingPolicy, stop: &AtomicBool) {
+    if stop.load(Ordering::SeqCst) {
         return;
+    }
+    // Only look up the LAN IP when a backend that needs it is in scope; a
+    // NAT-PMP-only session never contacts another backend or guesses an
+    // address through a UDP connect.
+    let local_ip = if policy
+        .backends()
+        .contains(&MappingPolicy::Upnp)
+    {
+        let ip = local_lan_ip();
+        if ip.is_none() {
+            warn(
+                "could not determine this machine's LAN IP; skipping UPnP \
+                  (you may need to forward the port manually)",
+            );
+        }
+        ip
+    } else {
+        None
     };
 
-    let Some((backend, lease)) = map_once(local_ip, port) else {
+    let Some((backend, lease)) = map_once(local_ip, port, policy) else {
         warn(&format!(
-            "automatic port mapping unavailable (no UPnP/NAT-PMP router \
-             found for port {port}); browsing/downloading firewalled peers \
-             may fail unless you forward TCP {port} on your router"
+            "port mapping ({policy}) unavailable for port {port}; browsing/\
+             downloading firewalled peers may fail unless you forward TCP \
+             {port} on your router"
         ));
         return;
     };
 
+    if stop.load(Ordering::SeqCst) {
+        remove(&backend);
+        return;
+    }
     manage(&backend, lease, port, stop);
 }
 
@@ -175,20 +254,45 @@ fn manage(backend: &Backend, lease: u32, port: u16, stop: &AtomicBool) {
             break; // asked to stop
         }
         if !renew(backend, port) {
-            // Renewal failed; the lease will expire on its own. Stop trying.
-            warn("failed to renew the port mapping; it may expire");
+            // One failed renewal stops the loop: no tight retry, no worker
+            // left behind. Remove what we created so no stale hole remains.
+            warn("failed to renew the port mapping; removing it and stopping");
+            remove(backend);
             return;
         }
     }
     remove(backend);
 }
 
-/// Attempt UPnP then NAT-PMP once. Returns the backend and granted lease seconds.
-fn map_once(local_ip: IpAddr, port: u16) -> Option<(Backend, u32)> {
-    if let Some(result) = map_upnp(local_ip, port) {
-        return Some(result);
+/// Try exactly the backends the policy names, in order. Returns the backend
+/// and granted lease seconds. Never falls through to an unnamed backend.
+fn map_once(
+    local_ip: Option<IpAddr>,
+    port: u16,
+    policy: MappingPolicy,
+) -> Option<(Backend, u32)> {
+    map_once_with(local_ip, port, policy, map_natpmp)
+}
+
+/// `natpmp` is injectable so a test can prove a backend is never contacted
+/// when the policy does not name it.
+fn map_once_with(
+    local_ip: Option<IpAddr>,
+    port: u16,
+    policy: MappingPolicy,
+    natpmp: impl Fn(u16) -> Option<(Backend, u32)>,
+) -> Option<(Backend, u32)> {
+    for backend in policy.backends() {
+        let result = match backend {
+            MappingPolicy::Upnp => local_ip.and_then(|ip| map_upnp(ip, port)),
+            MappingPolicy::Natpmp => natpmp(port),
+            MappingPolicy::Off | MappingPolicy::Auto => None,
+        };
+        if result.is_some() {
+            return result;
+        }
     }
-    map_natpmp(port)
+    None
 }
 
 fn map_upnp(local_ip: IpAddr, port: u16) -> Option<(Backend, u32)> {
@@ -213,33 +317,23 @@ fn map_via_gateway(
     // EXTERNAL port must equal it. If the exact port can't be mapped (e.g.
     // another LAN device already claimed it), a different external port would
     // be unreachable for our advertised address, so we give up rather than map
-    // a useless port. Some IGDs only accept permanent leases, so if the timed
-    // lease is refused, retry with lease 0 (permanent) before giving up.
-    let lease = match gateway.add_port(
+    // a useless port. A refused finite lease is likewise a refusal: never
+    // silently fall back to a permanent mapping we cannot expire on crash.
+    if let Err(e) = gateway.add_port(
         PortMappingProtocol::TCP,
         port,
         local_addr,
         LEASE_SECS,
         MAPPING_DESCRIPTION,
     ) {
-        Ok(()) => LEASE_SECS,
-        Err(_) => match gateway.add_port(
-            PortMappingProtocol::TCP,
-            port,
-            local_addr,
-            0,
-            MAPPING_DESCRIPTION,
-        ) {
-            Ok(()) => 0,
-            Err(e) => {
-                warn(&format!(
-                    "UPnP found a router but couldn't map port {port} ({e}); \
-                     try a different --listener-port or forward it manually"
-                ));
-                return None;
-            }
-        },
-    };
+        warn(&format!(
+            "UPnP found a router but refused a {LEASE_SECS}s lease for port \
+             {port} ({e}); no mapping was created — try a different \
+             --listener-port or forward it manually"
+        ));
+        return None;
+    }
+    let lease = LEASE_SECS;
     let external = gateway
         .get_external_ip()
         .map_or_else(|_| "?".to_string(), |ip| ip.to_string());
@@ -253,9 +347,7 @@ fn map_via_gateway(
             external_port: port,
             lease,
         },
-        // A permanent (0) lease needs no renewal timer; use the requested lease
-        // for the renewal cadence otherwise.
-        if lease == 0 { LEASE_SECS } else { lease },
+        lease,
     ))
 }
 
@@ -266,14 +358,26 @@ fn map_natpmp(port: u16) -> Option<(Backend, u32)> {
     let response =
         nat_pmp::map_tcp(gateway, port, port, LEASE_SECS, NATPMP_ATTEMPTS)
             .ok()?;
-    // We advertise our listen port verbatim, so a different external port would
-    // be unreachable for peers. Keep the mapping but warn loudly.
+    // The server advertises our listen port verbatim, so a different external
+    // port would be unreachable for peers. Do not keep a mapping that points
+    // somewhere we cannot advertise; undo it before returning.
     if response.external_port != port {
         warn(&format!(
-            "NAT-PMP granted external port {} instead of {port}; peers may not \
-             reach you — try forwarding TCP {port} manually",
+            "NAT-PMP granted external port {} instead of {port}; removing the \
+             mapping rather than advertising the wrong port — forward TCP \
+             {port} manually if you need it",
             response.external_port
         ));
+        let _ = nat_pmp::unmap_tcp(gateway, port, 2);
+        return None;
+    }
+    if response.lifetime == 0 {
+        warn(
+            "NAT-PMP granted a permanent mapping instead of a finite lease; \
+             removing it rather than leaving a mapping that cannot expire",
+        );
+        let _ = nat_pmp::unmap_tcp(gateway, port, 2);
+        return None;
     }
     info(&format!(
         "NAT-PMP: mapped external port {} -> local {port} (lease {}s)",
@@ -283,6 +387,7 @@ fn map_natpmp(port: u16) -> Option<(Backend, u32)> {
         Backend::NatPmp {
             gateway,
             internal_port: port,
+            lease: response.lifetime,
         },
         response.lifetime,
     ))
@@ -307,11 +412,12 @@ fn renew(backend: &Backend, port: u16) -> bool {
         Backend::NatPmp {
             gateway,
             internal_port,
+            lease,
         } => nat_pmp::map_tcp(
             *gateway,
             *internal_port,
             port,
-            LEASE_SECS,
+            *lease,
             NATPMP_ATTEMPTS,
         )
         .is_ok(),
@@ -331,6 +437,7 @@ fn remove(backend: &Backend) {
         Backend::NatPmp {
             gateway,
             internal_port,
+            ..
         } => {
             let _ = nat_pmp::unmap_tcp(*gateway, *internal_port, 2);
         }
@@ -395,6 +502,7 @@ impl PortMapper {
                     let backend = Backend::NatPmp {
                         gateway,
                         internal_port: port,
+                        lease: response.lifetime,
                     };
                     manage(&backend, response.lifetime, port, &thread_stop);
                 }
@@ -611,6 +719,107 @@ mod tests {
         assert!(
             body.contains("192.168.1.50"),
             "request should point at the LAN client: {body}"
+        );
+    }
+
+    #[test]
+    fn off_starts_no_worker_and_selects_no_backend() {
+        assert!(PortMapper::spawn(2234, MappingPolicy::Off).is_none());
+        assert!(MappingPolicy::Off.backends().is_empty());
+        assert_eq!(
+            MappingPolicy::Auto.backends(),
+            &[MappingPolicy::Upnp, MappingPolicy::Natpmp]
+        );
+        assert_eq!(MappingPolicy::Upnp.backends(), &[MappingPolicy::Upnp]);
+        assert_eq!(MappingPolicy::Natpmp.backends(), &[MappingPolicy::Natpmp]);
+    }
+
+    #[test]
+    fn selecting_one_backend_never_contacts_the_other() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let natpmp = move |port: u16| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(port, 2234);
+            None
+        };
+        assert!(map_once_with(None, 2234, MappingPolicy::Off, &natpmp).is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(map_once_with(None, 2234, MappingPolicy::Upnp, &natpmp).is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "upnp must not try nat-pmp");
+        assert!(map_once_with(None, 2234, MappingPolicy::Natpmp, &natpmp).is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(map_once_with(None, 2234, MappingPolicy::Auto, &natpmp).is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "auto falls through once");
+    }
+
+    /// A router that refuses a finite lease must not receive a second request
+    /// asking for a permanent one.
+    #[test]
+    fn a_refused_finite_lease_does_not_become_a_permanent_mapping() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let body = loop {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break String::new();
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf);
+                    if let Some(header_end) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("Content-Length: ")
+                                    .or_else(|| {
+                                        line.strip_prefix("content-length: ")
+                                    })
+                            })
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= header_end + 4 + len {
+                            break text[header_end + 4..].to_string();
+                        }
+                    }
+                };
+                if tx.send(body).is_err() {
+                    break;
+                }
+                let body = "lease refused";
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        let gateway = igd::Gateway {
+            addr,
+            control_url: "/ctl".to_string(),
+            control_schema: igd_control_schema(),
+        };
+        let local_addr =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 2234);
+        assert!(map_via_gateway(gateway, local_addr, 2234).is_none());
+        let first = rx
+            .recv_timeout(StdDuration::from_secs(3))
+            .expect("one lease request should reach the router");
+        assert!(
+            first.contains(&LEASE_SECS.to_string()),
+            "the request should ask for a finite lease: {first}"
+        );
+        assert!(
+            rx.recv_timeout(StdDuration::from_millis(300)).is_err(),
+            "a refused lease must not be retried as a permanent mapping"
         );
     }
 

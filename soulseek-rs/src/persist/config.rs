@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::port_mapping::MappingPolicy;
 use deser::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -12,6 +13,9 @@ pub struct FileConfig {
     pub server: Option<String>,
     pub listener_port: Option<u16>,
     pub disable_listener: Option<bool>,
+    /// Router mapping policy: `off` (the default), `auto`, `upnp`, or `natpmp`.
+    /// Independent of the peer listener.
+    pub port_mapping: Option<String>,
     /// Serve children in the distributed search network: other peers hang
     /// from this client and every search it receives is passed down to them.
     /// Off by default — it costs a socket and the network's whole search
@@ -52,6 +56,7 @@ impl FileConfig {
         "server",
         "listener_port",
         "disable_listener",
+        "port_mapping",
         "accept_children",
         "download_dir",
         "shared_dirs",
@@ -72,6 +77,7 @@ impl FileConfig {
             "server" => self.server.clone(),
             "listener_port" => self.listener_port.map(|v| v.to_string()),
             "disable_listener" => self.disable_listener.map(|v| v.to_string()),
+            "port_mapping" => self.port_mapping.clone(),
             "accept_children" => self.accept_children.map(|v| v.to_string()),
             "download_dir" => self.download_dir.clone(),
             "shared_dirs" => {
@@ -137,6 +143,18 @@ impl FileConfig {
                             ));
                         }
                     })
+                };
+            }
+            "port_mapping" => {
+                self.port_mapping = if clear {
+                    None
+                } else {
+                    Some(
+                        value
+                            .parse::<MappingPolicy>()
+                            .map_err(|e| format!("config set: {e}"))?
+                            .to_string(),
+                    )
                 };
             }
             "accept_children" => {
@@ -293,6 +311,7 @@ pub struct Resolved {
     pub server: String,
     pub listener_port: u16,
     pub disable_listener: bool,
+    pub port_mapping: MappingPolicy,
     pub accept_children: bool,
     pub download_dir: String,
     pub shared_dirs: Vec<String>,
@@ -320,8 +339,17 @@ pub const DEFAULT_SEARCH_TIMEOUT: u64 = 10;
 /// The listener has an explicit form in both directions: `--listener` beats
 /// `--no-listener` (and `SOULSEEK_NO_LISTENER`), which beats the file's
 /// `disable_listener`, so a config file can always be overridden per run.
-#[must_use]
-pub fn resolve(cli: &crate::cli::Cli, file: &FileConfig) -> Resolved {
+///
+/// Mapping is independent of the listener, with one exception: asking for a
+/// mapper without a listener is rejected here, before anything opens a socket.
+///
+/// # Errors
+/// Returns a message naming the bad setting for an unparsable mapping policy
+/// or for a mapping policy combined with a disabled listener.
+pub fn resolve(
+    cli: &crate::cli::Cli,
+    file: &FileConfig,
+) -> std::result::Result<Resolved, String> {
     let download_dir = cli
         .download_dir
         .clone()
@@ -332,7 +360,19 @@ pub fn resolve(cli: &crate::cli::Cli, file: &FileConfig) -> Resolved {
     } else {
         cli.no_listener || file.disable_listener.unwrap_or(false)
     };
-    Resolved {
+    let port_mapping = cli
+        .port_mapping
+        .as_deref()
+        .or(file.port_mapping.as_deref())
+        .map_or(Ok(MappingPolicy::Off), str::parse::<MappingPolicy>)
+        .map_err(|e| format!("config: {e}"))?;
+    if port_mapping != MappingPolicy::Off && disable_listener {
+        return Err(format!(
+            "port_mapping = '{port_mapping}' requires the peer listener; \
+             remove --no-listener / disable_listener or set port_mapping = 'off'"
+        ));
+    }
+    Ok(Resolved {
         username: cli.username.clone().or_else(|| file.username.clone()),
         server: cli
             .server
@@ -344,6 +384,7 @@ pub fn resolve(cli: &crate::cli::Cli, file: &FileConfig) -> Resolved {
             .or(file.listener_port)
             .unwrap_or(DEFAULT_LISTENER_PORT),
         disable_listener,
+        port_mapping,
         // A client with no listener has nothing for a child to dial, so the
         // setting only takes effect alongside one.
         accept_children: file.accept_children.unwrap_or(false)
@@ -368,7 +409,7 @@ pub fn resolve(cli: &crate::cli::Cli, file: &FileConfig) -> Resolved {
             .daemon_token
             .clone()
             .or_else(|| file.daemon_token.clone()),
-    }
+    })
 }
 
 /// Sharing follows the Soulseek convention of sharing what you download:
@@ -409,7 +450,7 @@ mod tests {
 
     #[test]
     fn defaults_apply_when_cli_and_file_are_empty() {
-        let resolved = resolve(&bare_cli(), &FileConfig::default());
+        let resolved = resolve(&bare_cli(), &FileConfig::default()).expect("resolve");
         assert_eq!(resolved.server, DEFAULT_SERVER);
         assert_eq!(resolved.listener_port, DEFAULT_LISTENER_PORT);
         assert_eq!(
@@ -422,8 +463,94 @@ mod tests {
     }
 
     #[test]
+    fn mapping_is_off_when_nothing_configures_it() {
+        let resolved = resolve(&bare_cli(), &FileConfig::default()).expect("resolve");
+        assert_eq!(resolved.port_mapping, MappingPolicy::Off);
+        assert_eq!(resolved.port_mapping.backends(), &[]);
+        // An old config without the new key acquires the off default.
+        let old = FileConfig {
+            username: Some("alice".into()),
+            ..FileConfig::default()
+        };
+        assert_eq!(
+            resolve(&bare_cli(), &old).expect("resolve").port_mapping,
+            MappingPolicy::Off
+        );
+    }
+
+    #[test]
+    fn every_mapping_mode_resolves_including_cli_over_file() {
+        for (text, expected) in [
+            ("off", MappingPolicy::Off),
+            ("auto", MappingPolicy::Auto),
+            ("upnp", MappingPolicy::Upnp),
+            ("natpmp", MappingPolicy::Natpmp),
+        ] {
+            let file = FileConfig {
+                port_mapping: Some(text.into()),
+                ..FileConfig::default()
+            };
+            assert_eq!(
+                resolve(&bare_cli(), &file).expect("resolve").port_mapping,
+                expected,
+                "file value {text}"
+            );
+            let mut cli = bare_cli();
+            cli.port_mapping = Some("off".into());
+            assert_eq!(
+                resolve(&cli, &file).expect("resolve").port_mapping,
+                MappingPolicy::Off,
+                "CLI must beat the file for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn mapping_and_listener_are_independent_except_for_invalid_combinations() {
+        let file = FileConfig {
+            port_mapping: Some("upnp".into()),
+            disable_listener: Some(true),
+            ..FileConfig::default()
+        };
+        let error = resolve(&bare_cli(), &file).unwrap_err();
+        assert!(error.contains("port_mapping"), "{error}");
+        assert!(error.contains("listener"), "{error}");
+
+        // The listener can be off with mapping off — that is the normal
+        // firewalled/no-incoming case.
+        let file = FileConfig {
+            disable_listener: Some(true),
+            ..FileConfig::default()
+        };
+        assert!(resolve(&bare_cli(), &file).expect("resolve").disable_listener);
+
+        // Mapping does not imply accepting children.
+        let file = FileConfig {
+            port_mapping: Some("auto".into()),
+            ..FileConfig::default()
+        };
+        let resolved = resolve(&bare_cli(), &file).expect("resolve");
+        assert_eq!(resolved.port_mapping, MappingPolicy::Auto);
+        assert!(!resolved.accept_children);
+    }
+
+    #[test]
+    fn an_invalid_mapping_value_is_rejected_before_any_network_work() {
+        let file = FileConfig {
+            port_mapping: Some("somewhere".into()),
+            ..FileConfig::default()
+        };
+        let error = resolve(&bare_cli(), &file).unwrap_err();
+        assert!(error.contains("port_mapping"), "{error}");
+        let mut config = FileConfig::default();
+        assert!(config.set("port_mapping", "somewhere").is_err());
+        config.set("port_mapping", "UPNP").expect("set");
+        assert_eq!(config.get("port_mapping").as_deref(), Some("upnp"));
+    }
+
+    #[test]
     fn default_download_dir_is_soulseek_folder_under_sync() {
-        let resolved = resolve(&bare_cli(), &FileConfig::default());
+        let resolved = resolve(&bare_cli(), &FileConfig::default()).expect("resolve");
         let path = std::path::Path::new(&resolved.download_dir);
         assert!(path.is_absolute(), "must not rely on ~ expansion");
         assert!(path.ends_with("Sync/M/Soulseek"), "{path:?}");
@@ -431,7 +558,7 @@ mod tests {
 
     #[test]
     fn sharing_defaults_to_the_download_dir() {
-        let resolved = resolve(&bare_cli(), &FileConfig::default());
+        let resolved = resolve(&bare_cli(), &FileConfig::default()).expect("resolve");
         assert_eq!(resolved.shared_dirs, vec![resolved.download_dir.clone()]);
     }
 
@@ -441,7 +568,7 @@ mod tests {
             download_dir: Some("/music".into()),
             ..FileConfig::default()
         };
-        let resolved = resolve(&bare_cli(), &file);
+        let resolved = resolve(&bare_cli(), &file).expect("resolve");
         assert_eq!(resolved.shared_dirs, vec!["/music".to_string()]);
     }
 
@@ -451,7 +578,7 @@ mod tests {
             shared_dir: Some(String::new()),
             ..FileConfig::default()
         };
-        let resolved = resolve(&bare_cli(), &file);
+        let resolved = resolve(&bare_cli(), &file).expect("resolve");
         assert!(resolved.shared_dirs.is_empty());
     }
 
@@ -461,7 +588,7 @@ mod tests {
             shared_dirs: Some(Vec::new()),
             ..FileConfig::default()
         };
-        let resolved = resolve(&bare_cli(), &file);
+        let resolved = resolve(&bare_cli(), &file).expect("resolve");
         assert!(resolved.shared_dirs.is_empty());
     }
 
@@ -471,7 +598,7 @@ mod tests {
             shared_dirs: Some(vec!["/a".into(), "/b".into()]),
             ..FileConfig::default()
         };
-        let resolved = resolve(&bare_cli(), &file);
+        let resolved = resolve(&bare_cli(), &file).expect("resolve");
         assert_eq!(
             resolved.shared_dirs,
             vec!["/a".to_string(), "/b".to_string()]
@@ -486,7 +613,7 @@ mod tests {
             shared_dirs: Some(vec!["/a".into(), "/b".into()]),
             ..FileConfig::default()
         };
-        let resolved = resolve(&cli, &file);
+        let resolved = resolve(&cli, &file).expect("resolve");
         assert_eq!(
             resolved.shared_dirs,
             vec!["/a".to_string(), "/b".to_string()]
@@ -497,7 +624,7 @@ mod tests {
     fn repeated_cli_shared_dirs_are_all_kept() {
         let mut cli = bare_cli();
         cli.shared_dir = vec!["/a".into(), "/b".into()];
-        let resolved = resolve(&cli, &FileConfig::default());
+        let resolved = resolve(&cli, &FileConfig::default()).expect("resolve");
         assert_eq!(
             resolved.shared_dirs,
             vec!["/a".to_string(), "/b".to_string()]
@@ -508,7 +635,7 @@ mod tests {
     fn an_empty_cli_shared_dir_disables_sharing() {
         let mut cli = bare_cli();
         cli.shared_dir = vec![String::new()];
-        let resolved = resolve(&cli, &FileConfig::default());
+        let resolved = resolve(&cli, &FileConfig::default()).expect("resolve");
         assert!(resolved.shared_dirs.is_empty());
     }
 
@@ -516,7 +643,7 @@ mod tests {
     fn no_listener_flag_disables_the_listener() {
         let mut cli = bare_cli();
         cli.no_listener = true;
-        assert!(resolve(&cli, &FileConfig::default()).disable_listener);
+        assert!(resolve(&cli, &FileConfig::default()).expect("resolve").disable_listener);
     }
 
     #[test]
@@ -525,11 +652,11 @@ mod tests {
             disable_listener: Some(true),
             ..FileConfig::default()
         };
-        assert!(resolve(&bare_cli(), &file).disable_listener);
+        assert!(resolve(&bare_cli(), &file).expect("resolve").disable_listener);
 
         let mut cli = bare_cli();
         cli.listener = true;
-        assert!(!resolve(&cli, &file).disable_listener);
+        assert!(!resolve(&cli, &file).expect("resolve").disable_listener);
     }
 
     #[test]
@@ -537,7 +664,7 @@ mod tests {
         let mut cli = bare_cli();
         cli.listener = true;
         cli.no_listener = true;
-        assert!(!resolve(&cli, &FileConfig::default()).disable_listener);
+        assert!(!resolve(&cli, &FileConfig::default()).expect("resolve").disable_listener);
     }
 
     #[test]
@@ -548,17 +675,17 @@ mod tests {
             accept_children: Some(true),
             ..FileConfig::default()
         };
-        assert!(resolve(&bare_cli(), &file).accept_children);
+        assert!(resolve(&bare_cli(), &file).expect("resolve").accept_children);
 
         let off = FileConfig {
             disable_listener: Some(true),
             ..file.clone()
         };
-        assert!(!resolve(&bare_cli(), &off).accept_children);
+        assert!(!resolve(&bare_cli(), &off).expect("resolve").accept_children);
 
         let mut cli = bare_cli();
         cli.no_listener = true;
-        assert!(!resolve(&cli, &file).accept_children);
+        assert!(!resolve(&cli, &file).expect("resolve").accept_children);
     }
 
     #[test]
@@ -578,6 +705,7 @@ mod tests {
             server: Some("localhost:2242".into()),
             listener_port: Some(4321),
             disable_listener: Some(true),
+            port_mapping: None,
             accept_children: None,
             download_dir: Some("/music".into()),
             shared_dir: Some("/shared".into()),
@@ -590,7 +718,7 @@ mod tests {
             wishlist: None,
             use_username_dirs: Some(false),
         };
-        let resolved = resolve(&bare_cli(), &file);
+        let resolved = resolve(&bare_cli(), &file).expect("resolve");
         assert_eq!(resolved.username.as_deref(), Some("alice"));
         assert_eq!(resolved.server, "localhost:2242");
         assert_eq!(resolved.listener_port, 4321);
@@ -618,7 +746,7 @@ mod tests {
             download_dir: Some("/file-dl".into()),
             ..FileConfig::default()
         };
-        let resolved = resolve(&cli, &file);
+        let resolved = resolve(&cli, &file).expect("resolve");
         assert_eq!(resolved.username.as_deref(), Some("cli-user"));
         assert_eq!(resolved.server, "cli-server:1");
         assert_eq!(resolved.listener_port, 1111);

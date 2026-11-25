@@ -43,10 +43,22 @@ pub fn search_gateway(options: SearchOptions) -> Result<Gateway, SearchError> {
 
         // limit read, to the remaining time available
         socket.set_read_timeout(Some(max_time - start.elapsed()))?;
-        let (read, _) = socket.recv_from(&mut buf)?;
-        let text = str::from_utf8(&buf[..read])?;
+        let (read, source) = socket.recv_from(&mut buf)?;
+        let text = match str::from_utf8(&buf[..read]) {
+            Ok(text) => text,
+            Err(e) => {
+                debug!("ignoring a non-UTF-8 SSDP reply: {e}");
+                continue;
+            }
+        };
 
-        let (addr, root_url) = parsing::parse_search_result(text)?;
+        let (addr, root_url) = match parse_reply_from(source.ip(), text) {
+            Ok(result) => result,
+            Err(e) => {
+                debug!("ignoring an unusable SSDP reply: {e}");
+                continue;
+            }
+        };
 
         let (control_schema_url, control_url) = match get_control_urls(&addr, &root_url, max_time - start.elapsed()) {
             Ok(o) => o,
@@ -80,6 +92,19 @@ pub fn search_gateway(options: SearchOptions) -> Result<Gateway, SearchError> {
     Err(SearchError::NoResponseWithinTimeout)
 }
 
+/// Only accept a LOCATION that names the host the datagram came from. A LAN
+/// peer can otherwise point our HTTP requests at an arbitrary address.
+fn parse_reply_from(
+    source: std::net::IpAddr,
+    text: &str,
+) -> Result<(SocketAddr, String), SearchError> {
+    let (addr, path) = parsing::parse_search_result(text)?;
+    if addr.ip() != source {
+        return Err(SearchError::InvalidResponse);
+    }
+    Ok((addr, path))
+}
+
 fn get_control_urls(addr: &SocketAddr, root_url: &str, timeout: Duration) -> Result<(String, String), SearchError> {
     let url = format!("http://{}:{}{}", addr.ip(), addr.port(), root_url);
     let body = http::get(&url, timeout)?;
@@ -94,4 +119,24 @@ fn get_schemas(
     let url = format!("http://{}:{}{}", addr.ip(), addr.port(), control_schema_url);
     let body = http::get(&url, timeout)?;
     parsing::parse_schemas(&body[..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn a_reply_must_name_the_host_it_came_from() {
+        let source = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let reply =
+            "location:http://192.168.1.1:80/rootDesc.xml\r\nserver: router";
+        assert!(parse_reply_from(source, reply).is_ok());
+        let steered = "location:http://10.0.0.9:80/rootDesc.xml";
+        assert!(
+            parse_reply_from(source, steered).is_err(),
+            "a datagram must not redirect our HTTP request elsewhere"
+        );
+        assert!(parse_reply_from(source, "garbage").is_err());
+    }
 }
