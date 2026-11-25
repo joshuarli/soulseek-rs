@@ -113,7 +113,7 @@ Next: 23
 
 - **Area:** Release verification
 - **Where:** TODO.md working checklist; docs/protocol-coverage.md; scripts/interop_nicotine.py
-- **Problem:** The carried-over checklist says the public-network smoke test was not run because no purpose-provided credentials exist. Local soulfind and Nicotine+ interoperability are verified, but live server behavior, real NAT conditions, and public peer behavior remain outside the checked evidence.
+- **Problem:** The carried-over checklist says the public-network smoke test was not run because no purpose-provided credentials exist. Local soulfind and Nicotine+ interoperability are verified, but live server behavior, real NAT conditions, and public peer behavior remain outside the checked evidence. Parked: no purpose-provided public-network credentials or authority to use the live Soulseek network are available in this run. Unblock when the owner supplies credentials and authorizes one bounded live verification; keep the local suites green meanwhile.
 - **Recommendation:** When suitable credentials are available, run one bounded manual verification of login, search, browse, download, upload serving, and daemon reconnection against the public network, recording the client revision and any protocol deltas. Do not weaken the local suites to wait for it.
 - **Fix with:** reference-parity
 - **Effort:** M
@@ -122,7 +122,7 @@ Next: 23
 
 - **Area:** Release and packaging
 - **Where:** .github/workflows/release.yml:388-423,475-479; scripts/package-linux.sh:1-54; packaging/nfpm.yaml; README.md installation
-- **Problem:** The workflow publishes only three tar.xz archives and SHA256SUMS as release-<sha> prereleases, while the tree still carries an uncalled nfpm package path and previously documented stable, nightly, installer, package-manager, and develop-channel artifacts. The supported installation contract is therefore an owner decision, not a documentation detail. Evidence is proven by the workflow and missing caller for package-linux.sh.
+- **Problem:** The workflow publishes only three tar.xz archives and SHA256SUMS as release-<sha> prereleases, while the tree still carries an uncalled nfpm package path and previously documented stable, nightly, installer, package-manager, and develop-channel artifacts. The supported installation contract is therefore an owner decision, not a documentation detail. Evidence is proven by the workflow and missing caller for package-linux.sh. Parked: the linked RFC is still a draft and the distribution contract is an owner decision (tarball-only prereleases, first-class distribution packages, or a restored installer/nightly channel). Unblock when the owner accepts one RFC option; then implement that contract and delete the RFC in the ticket's closing commit.
 - **Recommendation:** Decide among tarball-only prereleases, first-class distribution packages, or a restored installer/nightly channel using the linked RFC; then make the workflow, packaging files, metadata, and user docs implement that one contract.
 - **Fix with:** dead-code-archaeology
 - **Effort:** M
