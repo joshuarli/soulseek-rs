@@ -13,13 +13,31 @@ use soulseek_rs::{DownloadStatus, types::Download};
 use std::path::{Path, PathBuf};
 
 /// The shape every file is written in today. Bump it — and convert the older
-/// shapes in `load` — when one of them changes.
-const VERSION: u32 = 0;
+/// shapes in `load` — when one of them changes. Version 0 stored transfers as
+/// a `completed` boolean; version 1 stores explicit resume intent.
+const VERSION: u32 = 1;
 
 const PRETTY: deser_json::SerializerConfig =
     deser_json::SerializerConfig::builder()
         .pretty(deser_json::Indent::Spaces(2))
         .build();
+
+/// What a restored transfer is allowed to do on its own.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, deser::Deserialize,
+)]
+#[deser(rename_all = "snake_case")]
+pub enum ResumeIntent {
+    /// The automatic retry policy: one re-queue at startup, including for
+    /// failed and timed-out rows. A second failure is left for the user.
+    #[default]
+    AutoRetry,
+    /// The user paused this transfer. Restore it paused and wait for
+    /// `download.resume`; do not spend a queue position or bandwidth first.
+    Paused,
+    /// Terminal. Shown from disk, never re-queued.
+    Completed,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, deser::Deserialize)]
 pub struct PersistedDownload {
@@ -27,7 +45,7 @@ pub struct PersistedDownload {
     pub filename: String,
     pub size: u64,
     pub download_directory: String,
-    pub completed: bool,
+    pub intent: ResumeIntent,
 }
 
 impl PersistedDownload {
@@ -36,14 +54,39 @@ impl PersistedDownload {
         if matches!(download.status, DownloadStatus::Cancelled) {
             return None;
         }
+        let intent = match &download.status {
+            DownloadStatus::Completed => ResumeIntent::Completed,
+            DownloadStatus::Paused { .. } => ResumeIntent::Paused,
+            // Queued, InProgress, Failed and TimedOut all share the one
+            // automatic retry policy; Completed and Paused do not.
+            _ => ResumeIntent::AutoRetry,
+        };
         Some(Self {
             username: download.username.clone(),
             filename: download.filename.clone(),
             size: download.size,
             download_directory: download.download_directory.clone(),
-            completed: matches!(download.status, DownloadStatus::Completed),
+            intent,
         })
     }
+
+    /// Whether startup may re-queue this row without a new user decision.
+    #[must_use]
+    pub const fn replays(&self) -> bool {
+        matches!(self.intent, ResumeIntent::AutoRetry)
+    }
+}
+
+/// The pre-version-1 shape. A file in this shape cannot say whether an
+/// unfinished transfer was paused, so all unfinished rows migrate to the
+/// named automatic retry policy.
+#[derive(deser::Deserialize)]
+struct LegacyDownload {
+    username: String,
+    filename: String,
+    size: u64,
+    download_directory: String,
+    completed: bool,
 }
 
 /// One line of private-message history.
@@ -68,7 +111,35 @@ impl StateStore {
 
     #[must_use]
     pub fn load_downloads(&self) -> Vec<PersistedDownload> {
-        load(&self.dir.join("downloads.json"))
+        let path = self.dir.join("downloads.json");
+        let Some((version, data)) = load_envelope(&path) else {
+            return Vec::new();
+        };
+        if version < VERSION {
+            let legacy: Vec<LegacyDownload> =
+                deser_value::from_value(&data).unwrap_or_else(|_| {
+                    set_aside(&path, "unreadable");
+                    Vec::new()
+                });
+            return legacy
+                .into_iter()
+                .map(|row| PersistedDownload {
+                    username: row.username,
+                    filename: row.filename,
+                    size: row.size,
+                    download_directory: row.download_directory,
+                    intent: if row.completed {
+                        ResumeIntent::Completed
+                    } else {
+                        ResumeIntent::AutoRetry
+                    },
+                })
+                .collect();
+        }
+        deser_value::from_value(&data).unwrap_or_else(|_| {
+            set_aside(&path, "unreadable");
+            Vec::new()
+        })
     }
 
     pub fn save_downloads(
@@ -116,15 +187,15 @@ impl StateStore {
     }
 }
 
-/// Load `data` from an envelope file. Missing, corrupt, or newer-than-known
-/// files all yield `T::default()`.
-fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
+/// Read an envelope's version and payload. Missing, corrupt, or
+/// newer-than-known files yield nothing; callers decide what empty means.
+fn load_envelope(path: &Path) -> Option<(u32, Value)> {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return T::default();
+        return None;
     };
     let Ok(envelope) = deser_json::from_str::<Value>(&text) else {
         set_aside(path, "corrupt");
-        return T::default();
+        return None;
     };
     let version = envelope
         .get("version")
@@ -132,9 +203,20 @@ fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
         .unwrap_or(u64::MAX);
     if version > u64::from(VERSION) {
         set_aside(path, "from a newer version");
-        return T::default();
+        return None;
     }
-    let data = envelope.get("data").cloned().unwrap_or(Value::null());
+    Some((
+        version as u32,
+        envelope.get("data").cloned().unwrap_or(Value::null()),
+    ))
+}
+
+/// Load `data` from an envelope file. Missing, corrupt, or newer-than-known
+/// files all yield `T::default()`.
+fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
+    let Some((_, data)) = load_envelope(path) else {
+        return T::default();
+    };
     deser_value::from_value(&data).unwrap_or_else(|_| {
         set_aside(path, "unreadable");
         T::default()
@@ -188,8 +270,78 @@ mod tests {
             filename: "@@abc\\music\\song.mp3".into(),
             size: 123,
             download_directory: "/music".into(),
-            completed: false,
+            intent: ResumeIntent::AutoRetry,
         }
+    }
+
+    fn live_download(status: DownloadStatus) -> soulseek_rs::types::Download {
+        let (sender, _) = std::sync::mpsc::channel();
+        soulseek_rs::types::Download {
+            username: "peer".into(),
+            filename: "song.mp3".into(),
+            token: 7,
+            size: 123,
+            download_directory: "/music".into(),
+            status,
+            sender,
+            queue_position: None,
+            metadata: soulseek_rs::types::DownloadMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn capture_names_the_resume_intent() {
+        let paused = PersistedDownload::capture(&live_download(
+            DownloadStatus::Paused {
+                bytes_downloaded: 10,
+                total_bytes: 100,
+            },
+        ));
+        assert_eq!(
+            paused.expect("a paused transfer is persisted").intent,
+            ResumeIntent::Paused,
+            "a deliberate pause must survive the restart as a decision"
+        );
+
+        let failed = PersistedDownload::capture(&live_download(
+            DownloadStatus::Failed(Some("nope".into())),
+        ));
+        assert_eq!(
+            failed.expect("a failed transfer is persisted").intent,
+            ResumeIntent::AutoRetry,
+            "the named automatic retry policy covers failed rows"
+        );
+
+        let completed =
+            PersistedDownload::capture(&live_download(DownloadStatus::Completed));
+        assert_eq!(
+            completed.expect("a completed transfer is persisted").intent,
+            ResumeIntent::Completed,
+            "a completed row is terminal"
+        );
+        assert!(
+            PersistedDownload::capture(&live_download(DownloadStatus::Cancelled))
+                .is_none(),
+            "a cancelled row is never restored"
+        );
+    }
+
+    #[test]
+    fn a_file_from_before_resume_intent_migrates_by_completed_flag() {
+        let (tmp, store) = store();
+        let path = tmp.path().join("state").join("downloads.json");
+        std::fs::create_dir_all(path.parent().expect("a parent"))
+            .expect("the state directory");
+        std::fs::write(
+            &path,
+            r#"{"version":0,"data":[{"username":"peer","filename":"done.mp3","size":1,"download_directory":"/music","completed":true},{"username":"peer","filename":"open.mp3","size":2,"download_directory":"/music","completed":false}]}"#,
+        )
+        .expect("an older state file");
+
+        let downloads = store.load_downloads();
+        assert_eq!(downloads.len(), 2);
+        assert_eq!(downloads[0].intent, ResumeIntent::Completed);
+        assert_eq!(downloads[1].intent, ResumeIntent::AutoRetry);
     }
 
     #[test]

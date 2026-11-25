@@ -111,6 +111,7 @@ pub fn restore_searches(state: &mut AppState, queries: &[String]) {
 mod tests {
     use super::*;
     use crate::models::DownloadEntry;
+    use crate::persist::state::ResumeIntent;
     use soulseek_rs::DownloadStatus;
     use soulseek_rs::types::{Download, DownloadMetadata};
     use std::sync::atomic::AtomicBool;
@@ -148,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_maps_download_status_to_completed_flag() {
+    fn capture_maps_download_status_to_resume_intent() {
         let mut state = AppState::new();
         state
             .downloads
@@ -160,18 +161,26 @@ mod tests {
             "failed.mp3",
             DownloadStatus::Failed(Some("nope".into())),
         ));
+        state.downloads.push(download(
+            "paused.mp3",
+            DownloadStatus::Paused {
+                bytes_downloaded: 0,
+                total_bytes: 1,
+            },
+        ));
 
         let snapshot = Snapshot::capture(&state);
         assert_eq!(
             snapshot
                 .downloads
                 .iter()
-                .map(|d| (d.filename.as_str(), d.completed))
+                .map(|d| (d.filename.as_str(), d.intent))
                 .collect::<Vec<_>>(),
             vec![
-                ("done.mp3", true),
-                ("queued.mp3", false),
-                ("failed.mp3", false)
+                ("done.mp3", ResumeIntent::Completed),
+                ("queued.mp3", ResumeIntent::AutoRetry),
+                ("failed.mp3", ResumeIntent::AutoRetry),
+                ("paused.mp3", ResumeIntent::Paused),
             ]
         );
         assert_eq!(snapshot.downloads[0].username, "peer");

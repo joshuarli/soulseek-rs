@@ -9,7 +9,8 @@ use super::hub::{Hub, PendingBrowses, PendingDownload};
 use super::proto::{
     Ack, AuthResult, CODE_APPLICATION, CODE_INVALID_PARAMS, ChatMessageDto,
     DaemonStatus, DirectoriesParams, DirectoryParams, DownloadDto,
-    DownloadStartParams, DownloadStarted, Downloads, IntervalSeconds,
+    DownloadMetadataDto, DownloadStartParams, DownloadStarted, Downloads,
+    DownloadStatusDto, IntervalSeconds,
     MemberStats, Members, MessageParams, Messages, Method, OPENRPC,
     PROTOCOL_VERSION, PasswordParams, QueryParams, RoomRef, RoomUserStatsDto,
     RpcError, SayParams, SearchResultDto, SearchResults, SearchSummary,
@@ -35,6 +36,9 @@ pub struct Daemon {
     pub hub: Arc<Hub>,
     pub browses: Arc<PendingBrowses>,
     pub downloads: Arc<Mutex<Vec<PendingDownload>>>,
+    /// Paused transfers restored from disk. They are shown in `download.list`
+    /// but are not in the session until `download.resume` starts them.
+    pub paused: super::PausedDownloads,
     /// Where transfers land, on *this* machine. A caller may point it at a
     /// different folder with `download.set_dir`, but never per download.
     pub download_dir: Mutex<String>,
@@ -147,14 +151,39 @@ impl Daemon {
                 self.set_download_dir(dir.directory)?;
                 ok(Ack::OK)
             }
-            Method::DownloadList => ok(Downloads {
-                downloads: self
+            Method::DownloadList => {
+                let mut listed: Vec<DownloadDto> = self
                     .session
                     .get_all_downloads()
                     .iter()
                     .map(DownloadDto::from)
-                    .collect(),
-            }),
+                    .collect();
+                if let Ok(paused) = self.paused.lock() {
+                    for row in paused.iter() {
+                        let live = listed.iter().any(|download| {
+                            download.username == row.username
+                                && download.filename == row.filename
+                        });
+                        if live {
+                            continue;
+                        }
+                        listed.push(DownloadDto {
+                            username: row.username.clone(),
+                            filename: row.filename.clone(),
+                            token: 0,
+                            size: row.size,
+                            download_directory: row.download_directory.clone(),
+                            status: DownloadStatusDto::Paused {
+                                bytes_downloaded: 0,
+                                total_bytes: row.size,
+                            },
+                            queue_position: None,
+                            metadata: DownloadMetadataDto::default(),
+                        });
+                    }
+                }
+                ok(Downloads { downloads: listed })
+            }
             Method::DownloadPause => {
                 let transfer: TransferRef = parse(params)?;
                 ok(Ack {
@@ -165,38 +194,69 @@ impl Daemon {
             }
             Method::DownloadResume => {
                 let transfer: TransferRef = parse(params)?;
-                ok(Ack {
-                    ok: self.session.resume_download(
-                        &transfer.username,
-                        &transfer.filename,
-                    ),
-                })
+                let restored = self.paused.lock().ok().and_then(|paused| {
+                    paused
+                        .iter()
+                        .find(|row| {
+                            row.username == transfer.username
+                                && row.filename == transfer.filename
+                        })
+                        .cloned()
+                });
+                if let Some(row) = restored {
+                    // The transfer was never in the session: starting it *is*
+                    // the resume. Remove the held row only once it is queued,
+                    // so a failed start still leaves the decision on disk.
+                    self.start_download(DownloadStartParams {
+                        username: row.username.clone(),
+                        filename: row.filename.clone(),
+                        size: row.size,
+                        metadata: DownloadMetadataDto::default(),
+                    })?;
+                    if let Ok(mut paused) = self.paused.lock() {
+                        paused.retain(|held| {
+                            held.username != row.username
+                                || held.filename != row.filename
+                        });
+                    }
+                    ok(Ack::OK)
+                } else {
+                    ok(Ack {
+                        ok: self.session.resume_download(
+                            &transfer.username,
+                            &transfer.filename,
+                        ),
+                    })
+                }
             }
             Method::DownloadRemove => {
                 let transfer: TransferRef = parse(params)?;
+                let forgotten = self.forget_paused(&transfer);
                 ok(Ack {
                     ok: self.session.remove_download(
                         &transfer.username,
                         &transfer.filename,
-                    ),
+                    ) || forgotten,
                 })
             }
             Method::DownloadRemoveQueued => {
                 let transfer: TransferRef = parse(params)?;
+                let forgotten = self.forget_paused(&transfer);
                 ok(Ack {
                     ok: self.session.remove_queued_download(
                         &transfer.username,
                         &transfer.filename,
-                    ),
+                    ) || forgotten,
                 })
             }
             Method::DownloadCancel => {
                 let transfer: TransferRef = parse(params)?;
+                let forgotten = self.forget_paused(&transfer);
                 ok(Ack {
                     ok: self.session.cancel_download(
                         &transfer.username,
                         &transfer.filename,
-                    ),
+                    ) || forgotten,
                 })
             }
 
@@ -460,6 +520,20 @@ impl Daemon {
         ok(DownloadStarted {
             download: DownloadDto::from(&download),
         })
+    }
+
+    /// Forget a restored paused transfer when the user dismisses it, so the
+    /// decision does not come back on the next restart.
+    fn forget_paused(&self, transfer: &TransferRef) -> bool {
+        let Ok(mut paused) = self.paused.lock() else {
+            return false;
+        };
+        let before = paused.len();
+        paused.retain(|row| {
+            row.username != transfer.username
+                || row.filename != transfer.filename
+        });
+        paused.len() != before
     }
 
     fn download_dir(&self) -> String {
@@ -977,6 +1051,8 @@ mod tests {
         watched: Mutex<Vec<String>>,
         /// What `account.password` asked the session to set, if anything.
         password: Mutex<Option<String>>,
+        /// Files this session was actually asked to queue.
+        started: Mutex<Vec<String>>,
     }
 
     /// The one room `SilentSession` claims to have joined.
@@ -995,6 +1071,7 @@ mod tests {
             hub: Arc::new(Hub::new()),
             browses: Arc::new(PendingBrowses::default()),
             downloads: Arc::new(Mutex::new(Vec::new())),
+            paused: Arc::new(Mutex::new(Vec::new())),
             download_dir: Mutex::new("/tmp".to_string()),
             use_username_dirs: false,
             server: "server.invalid:2416".to_string(),
@@ -1087,16 +1164,31 @@ mod tests {
         }
         fn download_with_metadata(
             &self,
-            _filename: String,
-            _username: String,
-            _size: u64,
-            _directory: String,
+            filename: String,
+            username: String,
+            size: u64,
+            directory: String,
             _metadata: soulseek_rs::types::DownloadMetadata,
         ) -> soulseek_rs::Result<(
             soulseek_rs::types::Download,
             Receiver<soulseek_rs::DownloadStatus>,
         )> {
-            Err(soulseek_rs::SoulseekRs::NotConnected)
+            self.started.lock().expect("started").push(filename.clone());
+            let (sender, receiver) = std::sync::mpsc::channel();
+            Ok((
+                soulseek_rs::types::Download {
+                    username,
+                    filename,
+                    token: 1,
+                    size,
+                    download_directory: directory,
+                    status: soulseek_rs::DownloadStatus::Queued,
+                    sender,
+                    queue_position: None,
+                    metadata: soulseek_rs::types::DownloadMetadata::default(),
+                },
+                receiver,
+            ))
         }
         fn get_all_downloads(&self) -> Vec<soulseek_rs::types::Download> {
             Vec::new()
@@ -1242,5 +1334,101 @@ mod tests {
         ) -> soulseek_rs::Result<()> {
             Ok(())
         }
+    }
+
+    fn paused_row(filename: &str) -> crate::persist::state::PersistedDownload {
+        crate::persist::state::PersistedDownload {
+            username: "peer".into(),
+            filename: filename.into(),
+            size: 42,
+            download_directory: "/music".into(),
+            intent: crate::persist::state::ResumeIntent::Paused,
+        }
+    }
+
+    #[test]
+    fn a_restored_paused_transfer_is_listed_without_being_queued() {
+        let session = Arc::new(SilentSession::default());
+        let daemon = daemon_with("t", Arc::clone(&session));
+        daemon
+            .paused
+            .lock()
+            .expect("paused")
+            .push(paused_row("paused.mp3"));
+
+        let listed: Downloads = deser_value::from_value(
+            &daemon
+                .call(Method::DownloadList, Value::null())
+                .expect("download list"),
+        )
+        .expect("a downloads envelope");
+        assert_eq!(listed.downloads.len(), 1);
+        assert_eq!(
+            listed.downloads[0].status,
+            DownloadStatusDto::Paused {
+                bytes_downloaded: 0,
+                total_bytes: 42
+            }
+        );
+        assert!(
+            session.started.lock().expect("started").is_empty(),
+            "a restored pause spends no queue position or bandwidth"
+        );
+    }
+
+    #[test]
+    fn resuming_a_restored_pause_starts_it_once_and_forgets_the_hold() {
+        let session = Arc::new(SilentSession::default());
+        let daemon = daemon_with("t", Arc::clone(&session));
+        daemon
+            .paused
+            .lock()
+            .expect("paused")
+            .push(paused_row("paused.mp3"));
+
+        let answer = daemon
+            .call(
+                Method::DownloadResume,
+                deser_value::to_value(&TransferRef {
+                    username: "peer".into(),
+                    filename: "paused.mp3".into(),
+                })
+                .expect("params"),
+            )
+            .expect("resume is accepted");
+        let ack: Ack = deser_value::from_value(&answer).expect("ack");
+        assert!(ack.ok);
+        assert_eq!(
+            session.started.lock().expect("started").as_slice(),
+            ["paused.mp3"]
+        );
+        assert!(
+            daemon.paused.lock().expect("paused").is_empty(),
+            "the decision is spent once the transfer is live"
+        );
+    }
+
+    #[test]
+    fn dismissing_a_restored_pause_does_not_bring_it_back() {
+        let daemon = daemon_with_token("t");
+        daemon
+            .paused
+            .lock()
+            .expect("paused")
+            .push(paused_row("paused.mp3"));
+
+        let answer = daemon
+            .call(
+                Method::DownloadRemove,
+                deser_value::to_value(&TransferRef {
+                    username: "peer".into(),
+                    filename: "paused.mp3".into(),
+                })
+                .expect("params"),
+            )
+            .expect("remove is accepted");
+        let ack: Ack = deser_value::from_value(&answer).expect("ack");
+        assert!(ack.ok, "a row held only here is still removable");
+        assert!(daemon.paused.lock().expect("paused").is_empty());
     }
 }

@@ -7,7 +7,7 @@ use soulseek_rs::types::{Download, DownloadMetadata};
 use soulseek_rs_tui::models::{AppState, DownloadEntry};
 use soulseek_rs_tui::persist::config::FileConfig;
 use soulseek_rs_tui::persist::snapshot::{Snapshot, restore_searches};
-use soulseek_rs_tui::persist::state::StateStore;
+use soulseek_rs_tui::persist::state::{ResumeIntent, StateStore};
 
 fn download_entry(filename: &str, status: DownloadStatus) -> DownloadEntry {
     DownloadEntry {
@@ -46,6 +46,13 @@ fn state_survives_a_restart() {
                 speed_bytes_per_sec: 1.0,
             },
         ));
+        state.downloads.push(download_entry(
+            "paused.flac",
+            DownloadStatus::Paused {
+                bytes_downloaded: 100,
+                total_bytes: 1000,
+            },
+        ));
         restore_searches(&mut state, &["beatles".to_string()]);
         state.rooms.focus_or_open("indie");
 
@@ -62,20 +69,26 @@ fn state_survives_a_restart() {
     let parsed: deser_value::Value = deser_json::from_str(&raw).unwrap();
     assert!(parsed.get("version").is_some(), "missing version envelope");
 
-    // Session 2: a fresh store (new process) sees the same state; the
-    // incomplete download is flagged for auto-resume.
+    // Session 2: a fresh store (new process) sees the same state. Each
+    // transfer carries its own resume intent, so a deliberate pause is not
+    // mistaken for the automatic retry policy.
     let store = StateStore::new(state_dir);
     let downloads = store.load_downloads();
-    assert_eq!(downloads.len(), 2);
+    assert_eq!(downloads.len(), 3);
     assert!(
         downloads
             .iter()
-            .any(|d| d.filename == "done.flac" && d.completed)
+            .any(|d| d.filename == "done.flac" && d.intent == ResumeIntent::Completed)
     );
     assert!(
         downloads
             .iter()
-            .any(|d| d.filename == "half.flac" && !d.completed)
+            .any(|d| d.filename == "half.flac" && d.intent == ResumeIntent::AutoRetry)
+    );
+    assert!(
+        downloads
+            .iter()
+            .any(|d| d.filename == "paused.flac" && d.intent == ResumeIntent::Paused)
     );
     assert_eq!(store.load_search_queries(), vec!["beatles".to_string()]);
     assert_eq!(store.load_rooms(), vec!["indie".to_string()]);

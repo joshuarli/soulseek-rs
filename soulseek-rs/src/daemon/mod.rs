@@ -28,7 +28,9 @@ pub mod server;
 use crate::api::SessionApi;
 use crate::commands::{Ctx, Session};
 use crate::output::{CliError, CliResult, Out};
-use crate::persist::state::{PersistedDownload, PersistedMessage, StateStore};
+use crate::persist::state::{
+    PersistedDownload, PersistedMessage, ResumeIntent, StateStore,
+};
 use hub::{Hub, PendingBrowses, PendingDownload};
 use proto::ChatMessageDto;
 use server::Daemon;
@@ -57,6 +59,35 @@ const FAST_RETRY_BUDGET: u32 = 12;
 /// A long outage costs one login attempt per minute, bounded in rate but not
 /// in count, until the server answers or the daemon is stopped.
 const SLOW_RETRY_INTERVAL: Duration = RECONNECT_BACKOFF_CAP;
+
+/// Deliberately paused transfers, held outside the session until `resume`.
+/// Bounded so a restart cannot accumulate decisions without limit.
+pub type PausedDownloads = Arc<Mutex<Vec<PersistedDownload>>>;
+
+/// Full-queue policy for paused transfers: reject the newcomer and say so,
+/// keeping every earlier decision intact.
+const PAUSED_LIMIT: usize = 4096;
+
+fn remember_paused(paused: &Mutex<Vec<PersistedDownload>>, row: PersistedDownload) {
+    let Ok(mut paused) = paused.lock() else {
+        return;
+    };
+    let key = (row.username.as_str(), row.filename.as_str());
+    if paused
+        .iter()
+        .any(|p| (p.username.as_str(), p.filename.as_str()) == key)
+    {
+        return;
+    }
+    if paused.len() >= PAUSED_LIMIT {
+        soulseek_rs::warn!(
+            "paused transfer store is full; not restoring {}",
+            row.filename
+        );
+        return;
+    }
+    paused.push(row);
+}
 
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
@@ -193,9 +224,17 @@ pub fn run(
     let hub = Arc::new(Hub::new());
     let browses = Arc::new(PendingBrowses::default());
     let downloads = Arc::new(Mutex::new(Vec::new()));
+    let paused: PausedDownloads = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let rooms = restore(ctx, &store, session.client.as_ref(), &hub, &downloads);
+    let rooms = restore(
+        ctx,
+        &store,
+        session.client.as_ref(),
+        &hub,
+        &downloads,
+        &paused,
+    );
 
     let daemon = Arc::new(Daemon {
         session: Arc::clone(&session.client),
@@ -203,6 +242,7 @@ pub fn run(
         hub: Arc::clone(&hub),
         browses: Arc::clone(&browses),
         downloads: Arc::clone(&downloads),
+        paused: Arc::clone(&paused),
         download_dir: Mutex::new(ctx.download_dir.clone()),
         use_username_dirs: ctx.use_username_dirs,
         server: ctx.settings.server_address.to_string(),
@@ -550,14 +590,34 @@ fn join_rooms(out: &Out, session: &dyn SessionApi, rooms: &[String]) {
     }
 }
 
-/// Bring back what the last run left: re-queue unfinished transfers, rejoin
-/// rooms, and reload the conversation.
+/// Split persisted transfers into the rows to re-queue and the rows to hold.
+/// Completed rows are terminal; paused rows are the user's decision and must
+/// not consume a queue position or bandwidth on restart.
+fn plan_restore(
+    rows: Vec<PersistedDownload>,
+    paused: &Mutex<Vec<PersistedDownload>>,
+) -> Vec<PersistedDownload> {
+    let mut retries = Vec::new();
+    for row in rows {
+        match row.intent {
+            ResumeIntent::Completed => {}
+            ResumeIntent::Paused => remember_paused(paused, row),
+            ResumeIntent::AutoRetry => retries.push(row),
+        }
+    }
+    retries
+}
+
+/// Bring back what the last run left: re-queue transfers whose resume intent
+/// is `AutoRetry`, hold paused ones until `download.resume`, rejoin rooms, and
+/// reload the conversation.
 fn restore(
     ctx: &Ctx,
     store: &StateStore,
     session: &dyn SessionApi,
     hub: &Hub,
     downloads: &Mutex<Vec<PendingDownload>>,
+    paused: &Mutex<Vec<PersistedDownload>>,
 ) -> Vec<String> {
     hub.restore(
         store
@@ -575,17 +635,15 @@ fn restore(
     let rooms = store.load_rooms();
     join_rooms(&ctx.out, session, &rooms);
 
-    let unfinished: Vec<PersistedDownload> = store
-        .load_downloads()
-        .into_iter()
-        .filter(|download| !download.completed)
-        .collect();
-    if unfinished.is_empty() {
+    let retries = plan_restore(store.load_downloads(), paused);
+    if retries.is_empty() {
         return rooms;
     }
-    ctx.out
-        .status(&format!("resuming {} transfers", unfinished.len()));
-    for download in unfinished {
+    ctx.out.status(&format!(
+        "automatically retrying {} unfinished transfers",
+        retries.len()
+    ));
+    for download in retries {
         match session.download(
             download.filename.clone(),
             download.username.clone(),
@@ -601,9 +659,10 @@ fn restore(
                     });
                 }
             }
-            Err(e) => ctx
-                .out
-                .warn(&format!("cannot resume {}: {e}", download.filename)),
+            Err(e) => ctx.out.warn(&format!(
+                "cannot retry {}: {e}",
+                download.filename
+            )),
         }
     }
     rooms
@@ -617,11 +676,22 @@ fn save(
     hub: &Hub,
     daemon: &Daemon,
 ) {
-    let downloads: Vec<PersistedDownload> = session
+    let mut downloads: Vec<PersistedDownload> = session
         .get_all_downloads()
         .iter()
         .filter_map(PersistedDownload::capture)
         .collect();
+    if let Ok(paused) = daemon.paused.lock() {
+        for row in paused.iter() {
+            let listed = downloads.iter().any(|download| {
+                download.username == row.username
+                    && download.filename == row.filename
+            });
+            if !listed {
+                downloads.push(row.clone());
+            }
+        }
+    }
     let _ = store.save_downloads(&downloads);
 
     let messages: Vec<PersistedMessage> = hub
@@ -967,6 +1037,71 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_millis(200),
             "the 60s retry sleep must not delay a stop"
+        );
+    }
+
+    fn persisted(filename: &str, intent: ResumeIntent) -> PersistedDownload {
+        PersistedDownload {
+            username: "peer".into(),
+            filename: filename.into(),
+            size: 42,
+            download_directory: "/music".into(),
+            intent,
+        }
+    }
+
+    #[test]
+    fn a_paused_transfer_is_held_instead_of_retried_after_recovery() {
+        let paused = Mutex::new(Vec::new());
+        let retries = plan_restore(
+            vec![
+                persisted("done.mp3", ResumeIntent::Completed),
+                persisted("paused.mp3", ResumeIntent::Paused),
+                persisted("failed.mp3", ResumeIntent::AutoRetry),
+            ],
+            &paused,
+        );
+
+        assert_eq!(
+            retries
+                .iter()
+                .map(|row| row.filename.as_str())
+                .collect::<Vec<_>>(),
+            ["failed.mp3"],
+            "only the named automatic retry policy re-queues a transfer"
+        );
+        assert_eq!(
+            paused
+                .lock()
+                .expect("paused")
+                .iter()
+                .map(|row| row.filename.as_str())
+                .collect::<Vec<_>>(),
+            ["paused.mp3"],
+            "a deliberate pause waits for download.resume"
+        );
+    }
+
+    #[test]
+    fn the_paused_hold_rejects_a_duplicate_and_a_full_store() {
+        let paused = Mutex::new(Vec::new());
+        remember_paused(&paused, persisted("paused.mp3", ResumeIntent::Paused));
+        remember_paused(&paused, persisted("paused.mp3", ResumeIntent::Paused));
+        assert_eq!(
+            paused.lock().expect("paused").len(),
+            1,
+            "the same decision must not be held twice"
+        );
+
+        let mut full = (0..PAUSED_LIMIT)
+            .map(|n| persisted(&format!("{n}.mp3"), ResumeIntent::Paused))
+            .collect::<Vec<_>>();
+        let held = Mutex::new(std::mem::take(&mut full));
+        remember_paused(&held, persisted("overflow.mp3", ResumeIntent::Paused));
+        assert_eq!(
+            held.lock().expect("paused").len(),
+            PAUSED_LIMIT,
+            "a full store rejects the newcomer instead of growing unbounded"
         );
     }
 }

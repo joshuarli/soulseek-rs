@@ -10,7 +10,7 @@ use crate::api::SessionApi;
 use crate::models::{AppState, TuiExit};
 use crate::persist::{
     snapshot::{Snapshot, restore_messages, restore_searches},
-    state::{PersistedMessage, StateStore},
+    state::{PersistedMessage, ResumeIntent, StateStore},
 };
 use crate::error::Result;
 use crate::ui::tui::{
@@ -103,13 +103,36 @@ impl MainTui {
 
         let downloads = store.load_downloads();
         self.saved_snapshot = Snapshot::capture(&self.state);
-        // Completed entries are shown as-is; the rest re-enqueue below and
-        // reappear through the normal downloads channel.
+        // Completed and paused entries are shown as-is; only those with the
+        // automatic retry intent re-enqueue and reappear through the channel.
         self.saved_snapshot.downloads.clone_from(&downloads);
 
         let sender = self.downloads_sender();
         for entry in downloads {
-            if entry.completed {
+            if entry.intent == ResumeIntent::Paused {
+                // The user chose to stop this one. Show it as paused but do not
+                // queue it: `download.resume` starts it later.
+                self.state.downloads.push(crate::models::DownloadEntry {
+                    download: soulseek_rs::types::Download {
+                        username: entry.username,
+                        filename: entry.filename,
+                        token: 0,
+                        size: entry.size,
+                        download_directory: entry.download_directory,
+                        status: soulseek_rs::DownloadStatus::Paused {
+                            bytes_downloaded: 0,
+                            total_bytes: entry.size,
+                        },
+                        sender: std::sync::mpsc::channel().0,
+                        queue_position: None,
+                        metadata: soulseek_rs::types::DownloadMetadata::default(
+                        ),
+                    },
+                    receiver: None,
+                });
+                continue;
+            }
+            if entry.intent == ResumeIntent::Completed {
                 self.state.downloads.push(crate::models::DownloadEntry {
                     download: soulseek_rs::types::Download {
                         username: entry.username,

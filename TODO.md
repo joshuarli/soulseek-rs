@@ -19,15 +19,6 @@ Next: 23
 - **Fix with:** security
 - **Effort:** M
 
-### SOUL-16 · P2 · Paused downloads restart automatically after daemon recovery
-
-- **Area:** Durable transfer state
-- **Where:** soulseek-rs/src/persist/state.rs:24-45; soulseek-rs/src/daemon/mod.rs:578-594; soulseek-rs/src/daemon/proto/dto.rs:102-123
-- **Problem:** The live lifecycle distinguishes Queued, InProgress, Paused, Completed, Cancelled, Failed, and TimedOut, but persistence collapses every unfinished state to completed false. Restore calls download for every incomplete row, so a transfer the user deliberately paused consumes queue position and bandwidth after a daemon restart without a new user decision. Proven by construction.
-- **Recommendation:** Persist explicit resume intent rather than a boolean, with a migrated representation for paused transfers that restores them as paused until download.resume. Keep completed rows terminal and name any automatic retry policy for failed rows.
-- **Fix with:** durable-state
-- **Effort:** M
-
 ### SOUL-17 · P2 · Durable-state writes can fail once and silently lose restart state
 
 - **Area:** Durable state and errors
