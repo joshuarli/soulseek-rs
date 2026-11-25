@@ -40,6 +40,23 @@ requires `SOULFIND_BIN`. CI does **not** run the stress workload: it needs a
 local server and measures the machine as much as the client, so throughput is
 never a gate.
 
+### Local before/after check
+
+A release-mode, single-process share workload (4,000 synthetic files across 40
+folders, one scan, 2,000 search rounds) was run three times on the same macOS
+host against `main` and against the conservative-networking branch, interleaved:
+
+| Build | Median wall | Median user CPU | Peak RSS |
+| --- | --- | --- | --- |
+| `main` | 0.41 s | 0.06 s | ~3.87 MiB |
+| campaign | 0.40 s | 0.07 s | ~5.26 MiB |
+
+The extra ~1.4 MiB is the per-file root/relative identity kept to confine
+upload opens; matching time is unchanged within run-to-run spread. This
+workload has no peers or server, so it says nothing about transfer throughput,
+sockets or thread counts under the mixed-load `stress` profile. Those need a
+local soulfind and are not available as a repeatable before/after baseline here.
+
 ## Tuning the load
 
 Every knob is an env var; the defaults are in `Config::from_env`.
