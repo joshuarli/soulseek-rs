@@ -3,14 +3,19 @@
 ## Completion campaign (networking correctness)
 
 Review checkpoint: `79bc539`. Base: `d703c30`. Status: UP-1, FR-1, SH-1,
-ST-1 and TR-1 are accepted on `main` and verified by `make test` (1089 passed)
-and clippy. Listener threads are now owned and joined by the daemon, and a
+ST-1, TR-1 and NX-1 are accepted on `main`; `make test` (1089 passed) and clippy
+are green. Listener threads are now owned and joined by the daemon, and a
 focused standard (`owned-concurrency`) makes detached long-lived threads a
-must-fix finding. RS-1 has deterministic benchmarks and the stress workload but
-no checked-in reproducible daemon RSS measurement. NX-1: headless Nicotine+
-3.3.11 connected to a local soulfind and its file was discovered by this
-client; direct browse/download into that client remains unverified because
-soulfind reported its peer address as `0.0.0.0:0`.
+must-fix finding. NX-1: bidirectional interoperability with headless Nicotine+
+3.3.11 was verified against a local soulfind — this client browsed and
+downloaded `nico-share\nico-track.mp3` from Nicotine+, and a Python-driven
+Nicotine+ `core` browsed this daemon's `rustshare` and downloaded
+`share-rust\rust-track.mp3` to `Finished`. The earlier `0.0.0.0:0` peer address
+was a test-fixture fault: the Nicotine+ config file used Python-style quoted
+values (`login = 'nicouser'`), so the client logged in with quotes in its
+username and soulfind reported an address for a different name. RS-1 has
+deterministic benchmarks and the stress workload but still needs a checked-in
+reproducible daemon RSS measurement.
 
 ### Sequence
 
@@ -52,8 +57,10 @@ soulfind reported its peer address as `0.0.0.0:0`.
   One `cli_e2e` login-timeout case fails on this host at the pre-campaign
   commit as well; the rest pass.
 - An isolated Nicotine+ installation with `--headless` for interoperability.
-  Headless 3.3.11 was installed and connected locally; soulfind returned peer
-  address `0.0.0.0:0` for it, blocking direct peer connections in that setup.
+  Headless 3.3.11 connected to a local soulfind. Its config values must be
+  unquoted: `login = nicouser`, not `login = 'nicouser'`, or the quotes become
+  part of the login name and peer lookups fail. With that fixed, both browse and
+  download directions succeed.
 
 ### Decisions still in force
 

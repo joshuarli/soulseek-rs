@@ -17,9 +17,10 @@ Next: 9
       `SOULSEEK_E2E_REQUIRED=1` suite passed on macOS with two test threads
       (one earlier run failed only under default parallelism, when 100
       concurrent soulfind instances exhausted this host).
-- [ ] Independent-client (Nicotine+) interoperability: headless 3.3.11 in an
-      isolated venv connected to local soulfind and its shared file was found
-      by this client's `search`; a direct browse/download into that client was
-      blocked because soulfind reported its address as `0.0.0.0:0` in this
-      setup. Both-directions verification still open.
+- [x] Independent-client (Nicotine+) interoperability: headless 3.3.11 in an
+      isolated venv against local soulfind. This client browsed and downloaded
+      `nico-share\nico-track.mp3` from Nicotine+, and a Python-driven Nicotine+
+      `core` browsed this daemon's `rustshare` and downloaded
+      `share-rust\rust-track.mp3` to `Finished`. The earlier `0.0.0.0:0` peer
+      address was a quoted-username test-fixture fault.
 - [ ] Public-network smoke test: no purpose-provided credentials; not run.
