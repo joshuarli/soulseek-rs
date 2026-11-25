@@ -12,8 +12,10 @@
 mod audio;
 
 use crate::message::peer::{SharedDirectory, SharedFileEntry};
+use crate::message::Message;
+use crate::types::MAX_SEARCH_REPLY_FILES;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::io;
 use std::ffi::CString;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -61,12 +63,34 @@ pub struct SharedFile {
 }
 
 /// A read-only snapshot of the shared files, cheap to clone behind an `Arc`.
-#[derive(Debug, Default)]
+///
+/// The directory listing, its compressed browse reply and the folder index are
+/// built once when the snapshot is scanned, not when a peer asks for them. The
+/// operations thread therefore only clones bytes when serving a browse.
+#[derive(Debug)]
 pub struct Shares {
     files: Vec<Arc<SharedFile>>,
     by_virtual: HashMap<String, usize>,
     folder_count: usize,
+    directories: Arc<Vec<SharedDirectory>>,
+    by_folder: HashMap<String, Vec<SharedDirectory>>,
+    browse_response: Arc<Message>,
+    search_cache: Mutex<HashMap<String, Vec<usize>>>,
 }
+
+impl Default for Shares {
+    fn default() -> Self {
+        Self::from_files(Vec::new(), 0)
+    }
+}
+
+/// Queries kept in the search index. A full cache is cleared rather than
+/// allowed to grow with every distinct string a peer sends us.
+const MAX_CACHED_QUERIES: usize = 64;
+
+#[cfg(test)]
+pub(crate) static BROWSE_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 impl Shares {
     /// An empty share set (nothing shared).
@@ -171,15 +195,63 @@ impl Shares {
             .enumerate()
             .map(|(i, f)| (f.virtual_path.clone(), i))
             .collect();
+
+        // Group once, here, instead of on every browse or folder request that
+        // reaches the singleton operations loop.
+        let mut by_dir: std::collections::BTreeMap<
+            String,
+            Vec<SharedFileEntry>,
+        > = std::collections::BTreeMap::new();
+        for file in &files {
+            let (dir, base) = file
+                .virtual_path
+                .rsplit_once('\\')
+                .unwrap_or(("", file.virtual_path.as_str()));
+            let entry = SharedFileEntry {
+                name: base.to_string(),
+                size: file.size,
+                attributes: file.attributes.clone(),
+            };
+            if let Some(entries) = by_dir.get_mut(dir) {
+                entries.push(entry);
+            } else {
+                by_dir.insert(dir.to_string(), vec![entry]);
+            }
+        }
+        let directories: Vec<SharedDirectory> = by_dir
+            .into_iter()
+            .map(|(name, files)| SharedDirectory { name, files })
+            .collect();
+        let mut by_folder: HashMap<String, Vec<SharedDirectory>> =
+            HashMap::new();
+        for dir in &directories {
+            by_folder
+                .entry(dir.name.clone())
+                .or_default()
+                .push(dir.clone());
+        }
+
+        #[cfg(test)]
+        BROWSE_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let browse_response = Arc::new(
+            crate::message::peer::build_shared_file_list(&directories),
+        );
         Self {
             files,
             by_virtual,
             folder_count,
+            directories: Arc::new(directories),
+            by_folder,
+            browse_response,
+            search_cache: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Files whose virtual path contains *every* whitespace-separated term of
-    /// `query` (case-insensitive). An empty query matches nothing.
+    /// Files matching every term of `query`, case-insensitively.
+    ///
+    /// An empty query matches nothing. A single search returns at most
+    /// [`MAX_SEARCH_REPLY_FILES`] files: it is one reply to one peer, not the
+    /// whole result of the query.
     #[must_use]
     pub fn search(&self, query: &str) -> Vec<Arc<SharedFile>> {
         let terms: Vec<String> = query
@@ -190,11 +262,44 @@ impl Shares {
         if terms.is_empty() {
             return Vec::new();
         }
-        self.files
-            .iter()
-            .filter(|f| terms.iter().all(|t| f.search_key.contains(t.as_str())))
-            .cloned()
+        let key = terms.join("\u{0}");
+        if let Ok(cache) = self.search_cache.lock()
+            && let Some(indices) = cache.get(&key)
+        {
+            return indices
+                .iter()
+                .filter_map(|&i| self.files.get(i).cloned())
+                .collect();
+        }
+
+        let mut indices = Vec::new();
+        for (i, file) in self.files.iter().enumerate() {
+            if terms.iter().all(|t| file.search_key.contains(t.as_str())) {
+                indices.push(i);
+                if indices.len() == MAX_SEARCH_REPLY_FILES {
+                    break;
+                }
+            }
+        }
+        if let Ok(mut cache) = self.search_cache.lock() {
+            if cache.len() == MAX_CACHED_QUERIES {
+                cache.clear();
+            }
+            cache.insert(key, indices.clone());
+        }
+        indices
+            .into_iter()
+            .filter_map(|i| self.files.get(i).cloned())
             .collect()
+    }
+
+    /// Drop cached query matches. A new [`Shares`] snapshot already starts with
+    /// an empty cache; this is the explicit invalidation for a caller that
+    /// changes what a query should mean without replacing the snapshot.
+    pub fn invalidate_search_cache(&self) {
+        if let Ok(mut cache) = self.search_cache.lock() {
+            cache.clear();
+        }
     }
 
     /// Look up a shared file by its exact virtual path.
@@ -211,36 +316,28 @@ impl Shares {
         &self.files
     }
 
-    /// Files grouped by their virtual directory (everything before the final
-    /// backslash), in the form a browse or folder listing carries.
+    /// Files grouped by their virtual directory, in browse form.
+    ///
+    /// Grouping happens at scan time; the clone here is the only work on the
+    /// serving thread.
     #[must_use]
     pub fn directories(&self) -> Vec<SharedDirectory> {
-        let mut by_dir: std::collections::BTreeMap<
-            String,
-            Vec<SharedFileEntry>,
-        > = std::collections::BTreeMap::new();
-        for file in &self.files {
-            let (dir, base) = file
-                .virtual_path
-                .rsplit_once('\\')
-                .unwrap_or(("", file.virtual_path.as_str()));
-            let entry = SharedFileEntry {
-                name: base.to_string(),
-                size: file.size,
-                attributes: file.attributes.clone(),
-            };
-            // Looked up before inserting: `entry()` would allocate the key
-            // for every file, and a folder holds many.
-            if let Some(files) = by_dir.get_mut(dir) {
-                files.push(entry);
-            } else {
-                by_dir.insert(dir.to_string(), vec![entry]);
-            }
-        }
-        by_dir
-            .into_iter()
-            .map(|(name, files)| SharedDirectory { name, files })
-            .collect()
+        (*self.directories).clone()
+    }
+
+    /// The directories named `name`, without grouping the whole share again.
+    #[must_use]
+    pub fn directory(&self, name: &str) -> Vec<SharedDirectory> {
+        self.by_folder.get(name).cloned().unwrap_or_default()
+    }
+
+    /// The ready-to-send `SharedFileListResponse`.
+    ///
+    /// It was compressed when the share was scanned, not inside the operations
+    /// loop.
+    #[must_use]
+    pub fn browse_message(&self) -> Message {
+        (*self.browse_response).clone()
     }
 
     #[must_use]
@@ -531,7 +628,7 @@ pub(crate) fn synthetic_file(path: &Path) -> SharedFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{Shares, open_contained};
+    use super::{BROWSE_BUILDS, Shares, open_contained};
     use std::io::Read;
 
     fn temp_tree() -> std::path::PathBuf {
@@ -691,6 +788,73 @@ mod tests {
             root.clone(),
         ]);
         assert_eq!(shares.file_count(), 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn one_search_collects_at_most_one_reply_of_matches() {
+        // A broad query against a large share must not collect every match
+        // before the response cap is applied: the scan runs on the singleton
+        // operations thread, so the collection itself is the cost.
+        let files = (0..500)
+            .map(|i| super::synthetic_file(std::path::Path::new(&format!(
+                "match-{i:04}.mp3"
+            ))))
+            .collect();
+        let shares = super::Shares::from_files(files, 0);
+        assert_eq!(shares.files().len(), 500);
+        assert!(
+            shares.search("match").len() <= crate::types::MAX_SEARCH_REPLY_FILES,
+            "a single scan must stop at one reply's worth of matches"
+        );
+    }
+
+    #[test]
+    fn repeated_queries_reuse_the_index_until_it_is_invalidated() {
+        let root = temp_tree();
+        let shares = Shares::scan(&root).unwrap();
+        assert_eq!(shares.search_cache.lock().unwrap().len(), 0);
+        let first: Vec<_> = shares
+            .search("song")
+            .iter()
+            .map(|f| f.virtual_path.clone())
+            .collect();
+        assert_eq!(shares.search_cache.lock().unwrap().len(), 1);
+        let again: Vec<_> = shares
+            .search("song")
+            .iter()
+            .map(|f| f.virtual_path.clone())
+            .collect();
+        assert_eq!(again, first);
+        assert_eq!(shares.search_cache.lock().unwrap().len(), 1);
+        shares.invalidate_search_cache();
+        assert_eq!(shares.search_cache.lock().unwrap().len(), 0);
+        let after: Vec<_> = shares
+            .search("song")
+            .iter()
+            .map(|f| f.virtual_path.clone())
+            .collect();
+        assert_eq!(after, first);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn serving_a_browse_does_not_rebuild_or_recompress_the_listing() {
+        let root = temp_tree();
+        let shares = Shares::scan(&root).unwrap();
+        let built_at_scan = BROWSE_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
+        let expected =
+            crate::message::peer::build_shared_file_list(&shares.directories());
+
+        let first = shares.browse_message();
+        let second = shares.browse_message();
+        assert_eq!(
+            BROWSE_BUILDS.load(std::sync::atomic::Ordering::Relaxed),
+            built_at_scan,
+            "serving a browse must not rebuild or recompress the listing"
+        );
+        assert_eq!(first.get_data(), expected.get_data());
+        assert_eq!(second.get_data(), first.get_data());
         let _ = std::fs::remove_dir_all(root);
     }
 

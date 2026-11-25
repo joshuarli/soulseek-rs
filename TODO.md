@@ -19,15 +19,6 @@ Next: 23
 - **Fix with:** lifecycle-concurrency
 - **Effort:** M
 
-### SOUL-22 · P2 · Browse and search responses monopolize the singleton client operations loop
-
-- **Area:** Performance and lifecycle
-- **Where:** soulseek-rs-lib/src/client/operations/mod.rs:35-64,770-783; soulseek-rs-lib/src/shares/mod.rs:193-197,217-243; soulseek-rs-lib/src/message/peer/shared_file_list.rs:52-62; soulseek-rs-lib/src/client/operations/search.rs:71-81
-- **Problem:** One thread receives every client operation while also sweeping and polling. Browse construction rebuilds the complete directory listing and compresses it synchronously inside that operation, and search responses scan and collect matches before applying response caps. A large share or hostile burst of metadata requests can delay unrelated transfers, queue polling, connection sweeps, and user operations behind serialization work. The cost path is structurally proven; no latency benchmark was run.
-- **Recommendation:** Move listing construction/compression out of the singleton decision loop or precompute incremental share indexes and cached browse/search responses with explicit invalidation. Bound scan work per operation and measure a large-share browse/search burst against ordinary transfer progress before choosing the design.
-- **Fix with:** make-it-fast
-- **Effort:** M
-
 ### SOUL-9 · P3 · Verify one controlled session against the public Soulseek network
 
 - **Area:** Release verification

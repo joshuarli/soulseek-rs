@@ -68,22 +68,34 @@ impl Client {
             if username == own_username {
                 return;
             }
-            let response = match client_context.read_safe() {
-                Ok(ctx) => build_search_response(
-                    &ctx.shares,
-                    &own_username,
-                    token,
-                    &query,
-                    ctx.has_free_upload_slot(),
-                    ctx.last_upload_speed,
-                    ctx.upload_queue.len() as u32,
-                    &ctx.excluded_search_phrases,
-                ),
-                Err(e) => {
-                    error!("[client] IncomingSearch read: {}", e);
-                    return;
-                }
-            };
+            // Take only the small inputs under the lock. The scan is cached
+            // and stops at one reply's worth of matches inside `Shares`, and
+            // the compression must not hold the context lock or delay the
+            // rest of the operations loop's bookkeeping.
+            let (shares, free_slot, speed, queue_length, excluded) =
+                match client_context.read_safe() {
+                    Ok(ctx) => (
+                        Arc::clone(&ctx.shares),
+                        ctx.has_free_upload_slot(),
+                        ctx.last_upload_speed,
+                        ctx.upload_queue.len() as u32,
+                        ctx.excluded_search_phrases.clone(),
+                    ),
+                    Err(e) => {
+                        error!("[client] IncomingSearch read: {}", e);
+                        return;
+                    }
+                };
+            let response = build_search_response(
+                &shares,
+                &own_username,
+                token,
+                &query,
+                free_slot,
+                speed,
+                queue_length,
+                &excluded,
+            );
             let Some(message) = response else {
                 return; // no matching shares
             };

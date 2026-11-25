@@ -656,14 +656,12 @@ impl Client {
                         }
                     }
                     ClientOperation::ShareListRequested { requester_key } => {
+                        // The listing is grouped and compressed when the share
+                        // is scanned; the decision loop only clones the bytes.
                         Self::reply_to_peer(
                             &client_context,
                             &requester_key,
-                            |ctx| {
-                                crate::message::peer::build_shared_file_list(
-                                    &ctx.shares.directories(),
-                                )
-                            },
+                            |ctx| ctx.shares.browse_message(),
                         );
                     }
                     ClientOperation::UserInfoRequested { requester_key } => {
@@ -684,18 +682,13 @@ impl Client {
                         token,
                         folder,
                     } => {
-                        // ponytail: walks the whole share for one folder, as a
-                        // browse does; index by directory if it ever shows up.
+                        // The folder index was built at scan time, so one
+                        // folder no longer means grouping the whole share.
                         Self::reply_to_peer(
                             &client_context,
                             &requester_key,
                             |ctx| {
-                                let dirs: Vec<_> = ctx
-                                    .shares
-                                    .directories()
-                                    .into_iter()
-                                    .filter(|dir| dir.name == folder)
-                                    .collect();
+                                let dirs = ctx.shares.directory(&folder);
                                 crate::message::peer::build_folder_contents(
                                     token, &folder, &dirs,
                                 )
