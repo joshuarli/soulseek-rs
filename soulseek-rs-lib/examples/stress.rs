@@ -900,25 +900,33 @@ fn write_baseline(
     let _ = std::fs::write(path, body);
 }
 
-/// Peak resident set size in KiB. `getrusage` is the one counter available on
-/// both macOS and Linux without sampling /proc or spawning `ps`, and its unit
-/// differs between them: bytes on macOS, KiB on Linux.
+/// Peak resident set size in KiB. Supported pairs are macOS (bytes) and Linux
+/// (KiB), the two platforms this repository runs on; elsewhere the sample is
+/// reported as zero with a warning rather than with a wrong unit.
 fn peak_rss_kib() -> u64 {
     // SAFETY: `usage` is a zeroed, correctly aligned out-parameter for the
     // process we own; getrusage writes only within it.
-    unsafe {
+    let maxrss = unsafe {
         let mut usage: libc::rusage = std::mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) != 0 {
+            eprintln!("stress: getrusage failed; peak RSS is unavailable");
             return 0;
         }
-        #[cfg(target_os = "macos")]
-        {
-            usage.ru_maxrss as u64 / 1024
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            usage.ru_maxrss as u64
-        }
+        usage.ru_maxrss as u64
+    };
+    #[cfg(target_os = "macos")]
+    {
+        maxrss / 1024
+    }
+    #[cfg(target_os = "linux")]
+    {
+        maxrss
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("stress: peak RSS is supported on macOS and Linux only");
+        let _ = maxrss;
+        0
     }
 }
 
@@ -1095,18 +1103,22 @@ fn main() {
     // Sample thread count and RSS while the run is in flight. Both are process
     // wide: the mock swarm shares this process with the client, so the number
     // is an upper bound for the client alone, not a hidden client-only figure.
-    {
+    let sampler = {
         let peak_threads = peak_threads.clone();
         let peak_rss = peak_rss.clone();
         let stop = stop.clone();
-        std::thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                peak_threads.fetch_max(thread_count() as u64, Ordering::Relaxed);
-                peak_rss.fetch_max(peak_rss_kib(), Ordering::Relaxed);
-                std::thread::sleep(Duration::from_millis(200));
-            }
-        });
-    }
+        std::thread::Builder::new()
+            .name("stress-resource-sampler".into())
+            .spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    peak_threads
+                        .fetch_max(thread_count() as u64, Ordering::Relaxed);
+                    peak_rss.fetch_max(peak_rss_kib(), Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            })
+            .expect("spawn resource sampler")
+    };
 
     let mut workers = Vec::new();
 
@@ -1232,6 +1244,7 @@ fn main() {
     }
     let elapsed = started.elapsed();
     stop.store(true, Ordering::Relaxed);
+    let _ = sampler.join();
 
     // --- report -----------------------------------------------------------
     let score = compute_score(&metrics, elapsed);

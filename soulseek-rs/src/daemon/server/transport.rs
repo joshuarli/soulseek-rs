@@ -145,7 +145,13 @@ impl Listener {
     /// thread. The loop owns no thread of its own: its caller holds the
     /// handle and joins it on shutdown.
     pub fn serve(self, daemon: Arc<Daemon>, stop: &AtomicBool) {
-        self.set_nonblocking(true);
+        if let Err(e) = self.set_nonblocking(true) {
+            soulseek_rs::error!(
+                "control listener cannot be made nonblocking: {e}; its \
+                 accept loop is not started because it could not be stopped"
+            );
+            return;
+        }
         while !stop.load(Ordering::Relaxed) {
             match self.accept() {
                 Ok(stream) => {
@@ -163,16 +169,10 @@ impl Listener {
         }
     }
 
-    fn set_nonblocking(&self, nonblocking: bool) {
-        let result = match self {
+    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        match self {
             Self::Unix(listener) => listener.set_nonblocking(nonblocking),
             Self::Tcp(listener) => listener.set_nonblocking(nonblocking),
-        };
-        if let Err(e) = result {
-            soulseek_rs::warn!(
-                "control listener could not set nonblocking={nonblocking}: \
-                 {e}; shutdown may block in accept"
-            );
         }
     }
 

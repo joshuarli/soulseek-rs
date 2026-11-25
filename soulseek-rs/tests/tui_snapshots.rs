@@ -25,15 +25,26 @@ fn golden(name: &str) -> PathBuf {
         .join(format!("{name}.ptytest"))
 }
 
-fn start(label: &str, columns: u16, rows: u16) -> (PtyTest, TerminalBaseline) {
+fn start(
+    label: &str,
+    columns: u16,
+    rows: u16,
+) -> (PtyTest, TerminalBaseline, PathBuf) {
+    let gate = std::env::temp_dir()
+        .join(format!("soulseek-tui-browse-gate-{}-{label}", std::process::id()));
+    let _ = fs::remove_file(&gate);
     let scenario = Scenario::new(label)
         .expect("scenario")
         .command(CommandSpec::new(env!("CARGO_BIN_EXE_tui-fixture")))
         .size(Size::new(columns, rows).expect("size"))
-        .environment(TestEnv::hermetic().expect("environment"));
+        .environment(
+            TestEnv::hermetic()
+                .expect("environment")
+                .env("SOULSEEK_FIXTURE_BROWSE_GATE", &gate),
+        );
     let terminal = PtyTest::spawn(scenario).expect("spawn fixture");
     let baseline = terminal.terminal_baseline();
-    (terminal, baseline)
+    (terminal, baseline, gate)
 }
 
 fn settle(terminal: &mut PtyTest) {
@@ -189,7 +200,7 @@ fn login_screen_matches_the_recorded_frame() {
 
 #[test]
 fn populated_window_matches_the_recorded_frames() {
-    let (mut terminal, baseline) = start("tui-populated", 120, 40);
+    let (mut terminal, baseline, browse_gate) = start("tui-populated", 120, 40);
 
     wait_for(&mut terminal, "aphex twi");
     wait_for(&mut terminal, "Downloads/Uploads");
@@ -234,8 +245,11 @@ fn populated_window_matches_the_recorded_frames() {
     type_text(&mut terminal, "b");
     type_text(&mut terminal, "idm_peer");
     press(&mut terminal, Key::Enter);
+    // The gate withholds the fixture's reply until the loading frame is
+    // frozen, so the snapshot does not race a warm host's browse response.
     wait_for(&mut terminal, "Browse idm_peer");
     freeze(&terminal, "browse-120x40");
+    fs::write(&browse_gate, b"go").expect("release the browse reply");
     press(&mut terminal, Key::Escape);
     wait_until_absent(&mut terminal, "Browse idm_peer");
 
@@ -251,7 +265,7 @@ fn populated_window_matches_the_recorded_frames() {
 
 #[test]
 fn narrow_window_still_fits() {
-    let (mut terminal, baseline) = start("tui-narrow", 40, 24);
+    let (mut terminal, baseline, _gate) = start("tui-narrow", 40, 24);
 
     wait_for(&mut terminal, "Downloads/Up");
     freeze(&terminal, "main-40x24");
@@ -266,7 +280,7 @@ fn narrow_window_still_fits() {
 
 #[test]
 fn tiny_window_renders_without_content_rows() {
-    let (mut terminal, baseline) = start("tui-tiny", 40, 12);
+    let (mut terminal, baseline, _gate) = start("tui-tiny", 40, 12);
 
     wait_for(&mut terminal, "Results");
     freeze(&terminal, "main-40x12");
@@ -276,7 +290,7 @@ fn tiny_window_renders_without_content_rows() {
 
 #[test]
 fn wide_window_keeps_the_columns() {
-    let (mut terminal, baseline) = start("tui-wide", 200, 60);
+    let (mut terminal, baseline, _gate) = start("tui-wide", 200, 60);
 
     wait_for(&mut terminal, "aphex twi");
     freeze(&terminal, "main-200x60");
