@@ -73,6 +73,23 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MAX_PENDING_WRITE: usize = 1024 * 1024;
 
+/// Operations held for the next successful login. A full replay buffer rejects
+/// the newcomer rather than growing without limit across repeated reconnects.
+const MAX_REPLAY_MESSAGES: usize = 1024;
+
+impl ServerActor {
+    fn queue_for_replay(&mut self, msg: ServerMessage) {
+        if self.queued_messages.len() >= MAX_REPLAY_MESSAGES {
+            error!(
+                "[server] post-login replay queue full at {}; rejecting",
+                MAX_REPLAY_MESSAGES
+            );
+            return;
+        }
+        self.queued_messages.push(msg);
+    }
+}
+
 /// The server actor's mailbox. Marked non-exhaustive: each protocol message
 /// the client learns adds a variant, and that must not break callers.
 #[derive(Debug, Clone)]
@@ -590,7 +607,7 @@ impl ServerActor {
                 error!("Failed to send: {}", e);
             }
         } else {
-            self.queued_messages.push(frame);
+            self.queue_for_replay(frame);
         }
     }
 

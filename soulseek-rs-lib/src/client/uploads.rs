@@ -241,6 +241,12 @@ impl Client {
                 Self::finish_upload(&context, token, &file.real_path, result);
             })
         {
+            if matches!(
+                &e,
+                crate::utils::semaphore::SpawnError::Stopped
+            ) {
+                return;
+            }
             // The worker never started, so its history entry and slot must be
             // released here rather than left InProgress forever.
             error!("[client] cannot start upload {token}: {e}");
@@ -340,6 +346,12 @@ impl Client {
                 );
             })
         {
+            if matches!(
+                &e,
+                crate::utils::semaphore::SpawnError::Stopped
+            ) {
+                return;
+            }
             error!("[client] cannot start pierced upload {}: {e}", upload.token);
             Self::fail_upload(
                 client_context,

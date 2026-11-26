@@ -592,3 +592,18 @@ fn a_server_peer_that_never_drains_hits_a_bounded_queue_and_disconnects() {
         "a closed session must not carry queued bytes into the next one"
     );
 }
+
+#[test]
+fn the_replay_buffer_refuses_work_past_its_cap() {
+    let mut actor = parked_actor(1);
+    for token in 0..MAX_REPLAY_MESSAGES as u32 {
+        actor.queue_for_replay(ServerMessage::GetPeerAddress(token.to_string()));
+    }
+    assert_eq!(actor.queued_messages.len(), MAX_REPLAY_MESSAGES);
+    actor.queue_for_replay(ServerMessage::GetPeerAddress("extra".into()));
+    assert_eq!(
+        actor.queued_messages.len(),
+        MAX_REPLAY_MESSAGES,
+        "a full replay buffer must reject rather than grow without bound"
+    );
+}

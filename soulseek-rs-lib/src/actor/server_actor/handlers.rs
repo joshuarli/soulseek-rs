@@ -27,7 +27,7 @@ impl ServerActor {
                     | ServerMessage::Relogged
             )
         {
-            self.queued_messages.push(msg);
+            self.queue_for_replay(msg);
             return;
         }
 

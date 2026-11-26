@@ -221,6 +221,15 @@ impl Client {
                         }
                     },
                 ) {
+                    // Shutdown cancellation is not a transfer failure: the
+                    // owner is ending the session, so do not mark the download
+                    // Failed or invite a retry on the next start.
+                    if matches!(
+                        &e,
+                        crate::utils::semaphore::SpawnError::Stopped
+                    ) {
+                        return;
+                    }
                     // The claim above succeeded; with no worker to serve it,
                     // report the failure on the download itself instead of
                     // leaving a transfer stuck in progress.

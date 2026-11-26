@@ -39,6 +39,10 @@ pub trait Actor: Send + 'static {
 /// report goes back to the sender instead of being lost.
 pub const ACTOR_MAILBOX_DEPTH: usize = 256;
 
+/// Live actor threads one system may own. Peers and the server are capped
+/// upstream; this is the final bound on the handle collection itself.
+const MAX_OWNED_ACTORS: usize = 1024;
+
 #[derive(Clone)]
 pub struct ActorHandle<M: Send> {
     pub(crate) sender: BoundedSender<ActorMessage<M>>,
@@ -167,8 +171,17 @@ impl ActorSystem {
     where
         F: FnOnce(&mut A, ActorHandle<A::Message>) + Send + 'static,
     {
+        // Hold the owner lock across the stopped check, the spawn and the
+        // registration. A concurrent stop_all must never finish with an empty
+        // collection while a new actor is being started behind it.
+        let mut threads =
+            self.threads.lock().unwrap_or_else(PoisonError::into_inner);
         if self.stopped.load(Ordering::Acquire) {
             return Err(std::io::Error::other("actor system is stopping"));
+        }
+        threads.retain(|thread| !thread.handle.is_finished());
+        if threads.len() >= MAX_OWNED_ACTORS {
+            return Err(std::io::Error::other("actor thread cap reached"));
         }
         let (sender, receiver) =
             bounded_channel::<ActorMessage<A::Message>>(
@@ -193,12 +206,10 @@ impl ActorSystem {
                 actor.on_stop();
             })?;
 
-        self.threads.lock().unwrap_or_else(PoisonError::into_inner).push(
-            ActorThread {
-                stop,
-                handle: thread_handle,
-            },
-        );
+        threads.push(ActorThread {
+            stop,
+            handle: thread_handle,
+        });
         Ok(handle)
     }
 

@@ -243,14 +243,16 @@ impl WorkRegistry {
     where
         F: FnOnce(Arc<AtomicBool>) + Send + 'static,
     {
+        // Hold the owner lock across the stopped check, the spawn and the
+        // registration: stop_all must not drain the collection while a worker
+        // is starting behind it.
+        let mut tasks =
+            self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         if self.stopped.load(Ordering::Acquire) {
             return Err(SpawnError::Stopped);
         }
-        let mut tasks =
-            self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         Self::reap(&mut tasks);
         if tasks.len() >= self.capacity {
-            drop(tasks);
             error!(
                 "[admission] {label} worker cap {} reached; refusing",
                 self.capacity

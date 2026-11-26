@@ -70,8 +70,14 @@ pub type PausedDownloads = Arc<Mutex<Vec<PersistedDownload>>>;
 const PAUSED_LIMIT: usize = 4096;
 
 fn remember_paused(paused: &Mutex<Vec<PersistedDownload>>, row: PersistedDownload) {
-    let Ok(mut paused) = paused.lock() else {
-        return;
+    let mut paused = match paused.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            soulseek_rs::warn!(
+                "paused transfer store was poisoned; recovering its contents"
+            );
+            poisoned.into_inner()
+        }
     };
     let key = (row.username.as_str(), row.filename.as_str());
     if paused
@@ -727,15 +733,22 @@ fn save(
         .iter()
         .filter_map(PersistedDownload::capture)
         .collect();
-    if let Ok(paused) = daemon.paused.lock() {
-        for row in paused.iter() {
-            let listed = downloads.iter().any(|download| {
-                download.username == row.username
-                    && download.filename == row.filename
-            });
-            if !listed {
-                downloads.push(row.clone());
-            }
+    let paused = match daemon.paused.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            soulseek_rs::warn!(
+                "paused transfer store was poisoned; recovering its contents"
+            );
+            poisoned.into_inner()
+        }
+    };
+    for row in paused.iter() {
+        let listed = downloads.iter().any(|download| {
+            download.username == row.username
+                && download.filename == row.filename
+        });
+        if !listed {
+            downloads.push(row.clone());
         }
     }
     if store.save_downloads(&downloads).is_err() {
