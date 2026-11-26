@@ -1,13 +1,14 @@
 use super::{
     ActiveUpload, Arc, BrokeredUpload, Client, ClientContext, DownloadStatus,
     PeerMessage, RwLock, RwLockExt, ServerMessage, collect_failed_tokens,
-    debug, error, next_connect_token, next_upload_token, thread,
+    debug, error, next_connect_token, next_upload_token,
 };
 use crate::message::server::MessageFactory;
 use crate::peer::{ConnectionType, upload_peer};
 use crate::types::UploadStatus;
 use std::net::TcpStream;
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// How many finished upload records stay available to `uploads()`.
@@ -142,6 +143,7 @@ impl Client {
                 ctx.active_uploads.remove(&token);
             }
         }
+        let worker_cancel = Arc::clone(&cancel);
         ctx.active_uploads.insert(
             token,
             ActiveUpload {
@@ -149,64 +151,101 @@ impl Client {
                 filename: job.virtual_path.clone(),
                 size: job.size,
                 bytes_sent: bytes_sent.clone(),
-                cancel: cancel.clone(),
+                cancel,
                 status: UploadStatus::InProgress,
                 started: std::time::Instant::now(),
             },
         );
+        let work = Arc::clone(&ctx.work);
         drop(ctx);
         let own = own_username.to_string();
         let file = job.file;
         let downloader = job.downloader;
         let context = client_context.clone();
-        thread::spawn(move || {
-            // Most downloaders sit behind a NAT, so dialling them is a gamble
-            // that costs a 20s timeout when it fails. Like the reference
-            // clients, ask the server to have them connect back at the same
-            // time; the first socket to arrive claims the transfer, and port 0
-            // (the server not knowing where they listen) skips the dial.
-            let Some((connect_token, claimed)) =
-                Self::broker_upload(&context, token, &file, &downloader)
-            else {
-                return;
-            };
-            if port == 0 {
-                return;
+        // The socket does not exist until the dial below. The slot lets the
+        // owner shut it down on stop without borrowing it from the worker.
+        let closer_slot: Arc<Mutex<Option<TcpStream>>> =
+            Arc::new(Mutex::new(None));
+        let slot_for_stop = Arc::clone(&closer_slot);
+        let unblock: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Ok(slot) = slot_for_stop.lock()
+                && let Some(stream) = slot.as_ref()
+            {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
             }
-            let stream = match upload_peer::dial(&host, port) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    debug!(
-                        "[client] cannot dial {downloader} at {host}:{port} \
-                         for upload {token} ({e}); waiting for them to connect"
+        });
+        if let Err(e) =
+            work.try_spawn("soulseek-upload", Some(unblock), move |stop| {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                // Most downloaders sit behind a NAT, so dialling them is a
+                // gamble that costs a 20s timeout when it fails. Like the
+                // reference clients, ask the server to have them connect back
+                // at the same time; the first socket to arrive claims the
+                // transfer, and port 0 skips the dial.
+                let Some((connect_token, claimed)) =
+                    Self::broker_upload(&context, token, &file, &downloader)
+                else {
+                    return;
+                };
+                if port == 0 {
+                    Self::fail_upload(
+                        &context,
+                        token,
+                        "the peer gave no usable address",
                     );
                     return;
                 }
-            };
-            if claimed
-                .compare_exchange(
-                    false,
-                    true,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
-            {
-                return;
-            }
-            if let Ok(mut ctx) = context.write_safe() {
-                ctx.take_brokered_upload(connect_token);
-            }
-            let result = upload_peer::serve_direct(
-                stream,
-                &own,
-                token,
-                &file,
-                &bytes_sent,
-                &cancel,
-            );
-            Self::finish_upload(&context, token, &file.real_path, result);
-        });
+                let stream = match upload_peer::dial(&host, port) {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        debug!(
+                            "[client] cannot dial {downloader} at {host}:{port} \
+                             for upload {token} ({e}); waiting for them to connect"
+                        );
+                        return;
+                    }
+                };
+                if let Ok(mut slot) = closer_slot.lock() {
+                    *slot = stream.try_clone().ok();
+                }
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                if claimed
+                    .compare_exchange(
+                        false,
+                        true,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+                if let Ok(mut ctx) = context.write_safe() {
+                    ctx.take_brokered_upload(connect_token);
+                }
+                let result = upload_peer::serve_direct(
+                    stream,
+                    &own,
+                    token,
+                    &file,
+                    &bytes_sent,
+                    &worker_cancel,
+                );
+                if let Ok(mut slot) = closer_slot.lock() {
+                    *slot = None;
+                }
+                Self::finish_upload(&context, token, &file.real_path, result);
+            })
+        {
+            // The worker never started, so its history entry and slot must be
+            // released here rather than left InProgress forever.
+            error!("[client] cannot start upload {token}: {e}");
+            Self::fail_upload(client_context, token, "no upload worker slot");
+        }
     }
 
     /// Park the upload under a correlation token and ask the server to have
@@ -255,31 +294,59 @@ impl Client {
         if !upload.claim() {
             return;
         }
-        let Some((bytes_sent, cancel)) =
+        let Some((bytes_sent, cancel, work)) =
             client_context.write_safe().ok().and_then(|mut ctx| {
                 let active = ctx.active_uploads.get_mut(&upload.token)?;
                 active.started = std::time::Instant::now();
-                Some((active.bytes_sent.clone(), active.cancel.clone()))
+                Some((
+                    active.bytes_sent.clone(),
+                    active.cancel.clone(),
+                    Arc::clone(&ctx.work),
+                ))
             })
         else {
             return;
         };
         let context = client_context.clone();
-        thread::spawn(move || {
-            let result = upload_peer::serve_pierced(
-                stream,
-                upload.token,
-                &upload.file,
-                &bytes_sent,
-                &cancel,
-            );
-            Self::finish_upload(
-                &context,
-                upload.token,
-                &upload.file.real_path,
-                result,
-            );
+        let closer_slot = Arc::new(Mutex::new(stream.try_clone().ok()));
+        let slot_for_stop = Arc::clone(&closer_slot);
+        let unblock: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Ok(slot) = slot_for_stop.lock()
+                && let Some(stream) = slot.as_ref()
+            {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
         });
+        if let Err(e) =
+            work.try_spawn("soulseek-upload-pierced", Some(unblock), move |stop| {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                let result = upload_peer::serve_pierced(
+                    stream,
+                    upload.token,
+                    &upload.file,
+                    &bytes_sent,
+                    &cancel,
+                );
+                if let Ok(mut slot) = closer_slot.lock() {
+                    *slot = None;
+                }
+                Self::finish_upload(
+                    &context,
+                    upload.token,
+                    &upload.file.real_path,
+                    result,
+                );
+            })
+        {
+            error!("[client] cannot start pierced upload {}: {e}", upload.token);
+            Self::fail_upload(
+                client_context,
+                upload.token,
+                "no upload worker slot",
+            );
+        }
     }
 
     /// Mark upload `token` failed and hand its slot to the next in line.

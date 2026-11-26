@@ -8,8 +8,9 @@
 use super::{
     Arc, Client, ClientContext, ClientOperation, Download, DownloadError,
     DownloadPeer, DownloadStatus, MessageFactory, PeerMessage, RwLock,
-    RwLockExt, ServerMessage, debug, error, info, thread, trace,
+    RwLockExt, ServerMessage, debug, error, info, trace,
 };
+use std::sync::atomic::Ordering;
 
 const QUEUE_FULL_REASON: &str = "Upload queue full";
 
@@ -154,15 +155,17 @@ impl Client {
         let own_username = own_username.to_string();
         match operation {
             ClientOperation::DownloadFromPeer(token, peer, allowed) => {
-                let maybe_download = match client_context.write_safe() {
-                    Ok(mut ctx) => {
-                        ctx.downloads.claim_for_peer(token, &peer.username)
-                    }
-                    Err(e) => {
-                        error!("[client] DownloadFromPeer write: {}", e);
-                        return;
-                    }
-                };
+                let (maybe_download, work) =
+                    match client_context.write_safe() {
+                        Ok(mut ctx) => (
+                            ctx.downloads.claim_for_peer(token, &peer.username),
+                            Arc::clone(&ctx.work),
+                        ),
+                        Err(e) => {
+                            error!("[client] DownloadFromPeer write: {}", e);
+                            return;
+                        }
+                    };
                 trace!(
                     "[client] DownloadFromPeer token: {} peer: {:?}",
                     token, peer
@@ -176,41 +179,61 @@ impl Client {
                     return;
                 };
 
-                let client_context = client_context.clone();
+                let for_worker = Arc::clone(client_context);
 
-                thread::spawn(move || {
-                    let download_peer = DownloadPeer::new(
-                        download.username.clone(),
-                        peer.host.clone(),
-                        peer.port,
-                        token,
-                        allowed,
-                        own_username,
-                    );
-                    match download_peer.download_file(
-                        client_context,
-                        Some(download.clone()),
-                        None,
-                    ) {
-                        Ok((download, filename)) => {
-                            info!(
-                                "Successfully downloaded {} bytes to {}",
-                                download.size, filename
-                            );
+                if let Err(e) = work.try_spawn(
+                    "soulseek-download",
+                    None,
+                    move |cancel| {
+                        if cancel.load(Ordering::Acquire) {
+                            return;
                         }
-                        Err(DownloadError::Cancelled) => {}
-                        Err(e) => {
-                            error!(
-                                "Failed to download file '{}' from {}:{} (token: {}) - Error: {}",
-                                download.filename,
-                                peer.host,
-                                peer.port,
-                                download.token,
-                                e
-                            );
+                        let download_peer = DownloadPeer::new(
+                            download.username.clone(),
+                            peer.host.clone(),
+                            peer.port,
+                            token,
+                            allowed,
+                            own_username,
+                        );
+                        match download_peer.download_file(
+                            for_worker,
+                            Some(download.clone()),
+                            None,
+                        ) {
+                            Ok((download, filename)) => {
+                                info!(
+                                    "Successfully downloaded {} bytes to {}",
+                                    download.size, filename
+                                );
+                            }
+                            Err(DownloadError::Cancelled) => {}
+                            Err(e) => {
+                                error!(
+                                    "Failed to download file '{}' from {}:{} (token: {}) - Error: {}",
+                                    download.filename,
+                                    peer.host,
+                                    peer.port,
+                                    download.token,
+                                    e
+                                );
+                            }
                         }
+                    },
+                ) {
+                    // The claim above succeeded; with no worker to serve it,
+                    // report the failure on the download itself instead of
+                    // leaving a transfer stuck in progress.
+                    error!("[client] cannot start download {token}: {e}");
+                    if let Ok(mut ctx) = client_context.write_safe() {
+                        ctx.update_download_with_status(
+                            token,
+                            DownloadStatus::Failed(Some(
+                                "no download worker slot".to_string(),
+                            )),
+                        );
                     }
-                });
+                }
             }
             ClientOperation::UpdateDownloadTokens(transfer, username) => {
                 // Direction decides what a code 40 means; the old code read a
@@ -466,6 +489,67 @@ mod tests {
             Some(4096)
         );
         assert!(context.get_download_by_token(7).is_none());
+    }
+
+    #[test]
+    fn a_download_is_failed_when_the_worker_registry_is_full() {
+        use crate::utils::semaphore::WorkRegistry;
+        use std::time::Duration;
+
+        let client_context = Arc::new(RwLock::new(ClientContext::new()));
+        let work = Arc::new(WorkRegistry::new(1));
+        client_context.write().unwrap().work = Arc::clone(&work);
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        work.try_spawn("blocker", None, move |stop| {
+            entered_tx.send(()).unwrap();
+            while !stop.load(Ordering::Acquire)
+                && release_rx.recv_timeout(Duration::from_millis(5)).is_err()
+            {}
+        })
+        .expect("the only slot is free");
+        entered_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+
+        client_context.write().unwrap().add_download(Download {
+            username: "bob".to_string(),
+            filename: "song.mp3".to_string(),
+            token: 9,
+            size: 100,
+            download_directory: "test".to_string(),
+            status: DownloadStatus::Queued,
+            sender: std::sync::mpsc::channel().0,
+            queue_position: None,
+            metadata: crate::types::DownloadMetadata::default(),
+        });
+        let peer = crate::peer::Peer::new(
+            "bob".to_string(),
+            crate::peer::ConnectionType::P,
+            "127.0.0.1".to_string(),
+            1,
+            None,
+            0,
+            0,
+            0,
+        );
+        Client::on_transfers(
+            ClientOperation::DownloadFromPeer(9, peer, true),
+            &client_context,
+            "me",
+        );
+
+        assert!(
+            matches!(
+                client_context
+                    .read()
+                    .unwrap()
+                    .get_download_by_token(9)
+                    .map(|download| &download.status),
+                Some(DownloadStatus::Failed(_))
+            ),
+            "a refused worker must not leave a download stuck in progress"
+        );
+        let _ = release_tx.send(());
+        work.stop_all();
     }
 
     #[test]

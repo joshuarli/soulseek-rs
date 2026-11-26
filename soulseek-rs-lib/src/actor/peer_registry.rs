@@ -4,12 +4,12 @@ use crate::client::ClientOperation;
 use crate::message::MessageReader;
 use crate::peer::Peer;
 use crate::utils::lock::MutexExt;
+use crate::utils::semaphore::BoundedSender;
 use crate::{debug, error};
 
 use std::collections::{HashMap, HashSet};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 /// Source of unique per-actor ids so terminal-outcome eviction can be made
@@ -23,7 +23,7 @@ type PeerMap = HashMap<String, (u64, ActorHandle<PeerMessage>)>;
 pub struct PeerRegistry {
     peers: Arc<Mutex<PeerMap>>,
     actor_system: Arc<ActorSystem>,
-    client_channel: Sender<ClientOperation>,
+    client_channel: BoundedSender<ClientOperation>,
     own_username: String,
     capacity: Arc<AtomicUsize>,
 }
@@ -32,7 +32,7 @@ impl PeerRegistry {
     #[must_use]
     pub fn new(
         actor_system: Arc<ActorSystem>,
-        client_channel: Sender<ClientOperation>,
+        client_channel: BoundedSender<ClientOperation>,
         own_username: String,
     ) -> Self {
         Self::with_capacity(
@@ -46,7 +46,7 @@ impl PeerRegistry {
     #[must_use]
     pub(crate) fn with_capacity(
         actor_system: Arc<ActorSystem>,
-        client_channel: Sender<ClientOperation>,
+        client_channel: BoundedSender<ClientOperation>,
         own_username: String,
         capacity: Arc<AtomicUsize>,
     ) -> Self {
@@ -269,6 +269,7 @@ mod tests {
     use super::PeerRegistry;
     use crate::actor::ActorSystem;
     use crate::peer::{ConnectionType, Peer};
+    use crate::utils::semaphore::bounded_channel;
     use std::collections::HashSet;
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
@@ -300,7 +301,7 @@ mod tests {
         std::sync::mpsc::Receiver<crate::client::ClientOperation>,
     ) {
         let system = Arc::new(ActorSystem::new());
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = bounded_channel(64, "test operations");
         let registry = PeerRegistry::with_capacity(
             system,
             tx,
@@ -377,7 +378,7 @@ mod tests {
     #[test]
     fn remove_peer_if_respects_actor_identity() {
         let system = Arc::new(ActorSystem::new());
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = bounded_channel(64, "test operations");
         let registry = PeerRegistry::new(system, tx, "me".to_string());
 
         // A real loopback connection makes the actor inbound (no dial-out);
@@ -422,7 +423,7 @@ mod tests {
         use crate::client::ClientOperation;
 
         let system = Arc::new(ActorSystem::new());
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = bounded_channel(64, "test operations");
         let registry = PeerRegistry::new(system, tx, "me".to_string());
 
         // A port with nothing listening behind it: bind, learn it, drop it.

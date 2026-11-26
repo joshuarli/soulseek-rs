@@ -50,6 +50,7 @@ use crate::types::{
     SessionLoss, SessionWatch, SimilarUser, UserInterests,
 };
 use crate::utils::lock::RwLockExt;
+use crate::utils::semaphore::BoundedSender;
 
 use std::io::{self, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -281,7 +282,7 @@ pub struct ServerActor {
     stream: Option<TcpStream>,
     connection_state: ConnectionState,
     reader: MessageReader,
-    client_channel: Sender<ClientOperation>,
+    client_channel: BoundedSender<ClientOperation>,
     self_handle: Option<ActorHandle<ServerMessage>>,
     dispatcher: Option<MessageDispatcher<ServerMessage>>,
     dispatcher_receiver: Option<Receiver<ServerMessage>>,
@@ -327,7 +328,7 @@ impl ServerActor {
     #[must_use]
     pub fn new(
         address: PeerAddress,
-        client_channel: Sender<ClientOperation>,
+        client_channel: BoundedSender<ClientOperation>,
         listen_port: u16,
         enable_listen: bool,
         shared_folder_count: u32,

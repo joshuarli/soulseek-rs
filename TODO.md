@@ -1,15 +1,6 @@
 Prefix: SOUL
 Next: 27
 
-### SOUL-13 · P1 · Network-facing work still has no aggregate admission and ownership envelope
-
-- **Area:** Concurrency and resource bounds
-- **Where:** docs/roadmap.md:22-26; docs/network-contract.md:57-60; soulseek-rs-lib/src/actor/mod.rs:121; soulseek-rs-lib/src/client/connection.rs:54-57,171-201; soulseek-rs-lib/src/client/operations/transfers.rs:49-81; soulseek-rs-lib/src/client/uploads.rs:162-209,268-282; soulseek-rs-lib/src/peer/listen.rs:333,384-391,477-479; soulseek-rs/src/daemon/server/transport.rs:318-359
-- **Problem:** RS-1 remains incomplete: actor mailboxes and the client operation channel are unbounded. The same envelope also excludes transfer threads and accepted control connections: downloads, uploads, and inbound file connections use plain thread::spawn with discarded handles, no global permit, no registry, and no shutdown join; daemon shutdown stops accepting control clients but does not own existing connection threads. A burst of peers or user requests can exhaust threads or memory and work can outlive its owner. The facts are proven directly in source and the roadmap; no new stress measurement was run.
-- **Recommendation:** Finish RS-1 as one owned admission design: bounded actor and operation queues with explicit block/reject/drop policy, a bounded transfer registry with cancellation tokens and join ownership, builder-based spawn failure handling, and daemon control-connection shutdown ownership. Validate with the existing daemon RSS and stress workloads rather than claiming a budget first.
-- **Fix with:** lifecycle-concurrency
-- **Effort:** L
-
 ### SOUL-23 · P2 · Reconnect leaves report_cant_connect sending on a dead dispatcher
 
 - **Area:** Recovery and error propagation

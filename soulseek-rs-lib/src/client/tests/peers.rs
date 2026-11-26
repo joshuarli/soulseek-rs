@@ -1,13 +1,14 @@
 //! Uploads, broker connects, and the peers a disconnect may not drop.
 
 use super::*;
+use crate::utils::semaphore::bounded_channel;
 use std::io::Read;
 
 static TEST_DIR_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn captured_peer(
     username: &str,
-    ops: &mpsc::Sender<ClientOperation>,
+    ops: &BoundedSender<ClientOperation>,
 ) -> (PeerRegistry, TcpStream) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -68,7 +69,7 @@ fn assert_no_frame(stream: &mut TcpStream) {
     }
 }
 
-fn fence(ops: &mpsc::Sender<ClientOperation>, client: &Client, value: u32) {
+fn fence(ops: &BoundedSender<ClientOperation>, client: &Client, value: u32) {
     ops.send(ClientOperation::OwnPrivileges(value)).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while client.own_privilege_seconds() != Some(value) {
@@ -178,7 +179,7 @@ fn upload_speed_is_reported_only_while_running() {
 #[test]
 fn a_clean_disconnect_keeps_queued_uploads_an_error_drops_them() {
     let client = Client::new("test-user", "test-password");
-    let (ops, ops_rx) = mpsc::channel();
+    let (ops, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),
@@ -357,7 +358,7 @@ fn an_active_login_wait_ends_when_stop_is_set() {
 #[test]
 fn broker_admission_refusal_fails_queued_downloads_with_a_retryable_cause() {
     let client = Client::new("me", "p");
-    let (ops, ops_rx) = mpsc::channel();
+    let (ops, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),
@@ -532,7 +533,7 @@ fn the_server_is_told_our_child_capacity_only_when_it_changes() {
 #[test]
 fn a_full_broker_table_fails_the_upload_without_holding_the_context_lock() {
     let client = Client::new("u", "p");
-    let (ops, ops_rx) = mpsc::channel();
+    let (ops, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),
@@ -615,7 +616,7 @@ fn a_full_broker_table_fails_the_upload_without_holding_the_context_lock() {
 #[test]
 fn a_full_peer_queue_denies_the_request_and_a_retry_takes_the_freed_place() {
     let client = Client::new("u", "p");
-    let (ops, ops_rx) = mpsc::channel();
+    let (ops, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),
@@ -686,7 +687,7 @@ fn a_full_peer_queue_denies_the_request_and_a_retry_takes_the_freed_place() {
 #[test]
 fn a_globally_full_queue_denies_a_new_peer_and_recovers_when_a_place_frees() {
     let client = Client::new("u", "p");
-    let (ops, ops_rx) = mpsc::channel();
+    let (ops, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),
@@ -847,7 +848,7 @@ fn a_late_answer_and_the_sweep_leave_one_record_whichever_runs_first() {
 #[test]
 fn a_live_address_response_serves_the_offer_and_fills_the_freed_slot() {
     let client = Client::new("u", "p");
-    let (ops, ops_rx) = mpsc::channel();
+    let (ops, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),
@@ -881,7 +882,7 @@ fn a_live_address_response_serves_the_offer_and_fills_the_freed_slot() {
 #[test]
 fn a_pending_serve_that_cannot_be_tracked_reports_a_failure_and_frees_the_slot() {
     let client = Client::new("u", "p");
-    let (ops, ops_rx) = mpsc::channel();
+    let (ops, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),

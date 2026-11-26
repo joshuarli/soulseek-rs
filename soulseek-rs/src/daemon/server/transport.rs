@@ -10,16 +10,19 @@ use super::super::proto::{
     AuthParams, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND, CODE_PARSE,
     Method, Request, Response, RpcError,
 };
+use super::super::hub::Hub;
 use super::Daemon;
 use crate::output::Exit;
 use deser_value::Value;
+use soulseek_rs::utils::semaphore::WorkRegistry;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// How long a failed authentication costs the caller. Not a serious defence —
 /// the token is 256 bits — but it keeps a wrong-token loop off the CPU.
@@ -47,6 +50,10 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// daemon's own shutdown writes to the pipe, so an idle listener wakes at once;
 /// a test holding only the flag still sees it within this interval.
 const STOP_CHECK_INTERVAL_MS: libc::c_int = 100;
+
+/// How long a connection teardown lets the writer flush queued replies before
+/// the socket is shut down to unblock a stalled write.
+const WRITER_FLUSH_GRACE: Duration = Duration::from_millis(200);
 
 /// An explicit wakeup for listeners parked in readiness waiting. The write end
 /// is shared by all listeners; each gets its own readable duplicate.
@@ -271,6 +278,10 @@ impl Listener {
             );
             return;
         }
+        // One owner for every accepted connection. Stopping the listener ends
+        // the accept loop, then stop_all signals, unblocks and joins the
+        // connections it started instead of leaving them running.
+        let connections = WorkRegistry::new(MAX_CONNECTIONS);
         loop {
             if !wait_for_readiness(
                 self.fd(),
@@ -285,7 +296,7 @@ impl Listener {
             match self.accept() {
                 Ok(stream) => {
                     stream.make_blocking();
-                    spawn_connection(stream, Arc::clone(&daemon));
+                    spawn_connection(stream, Arc::clone(&daemon), &connections);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => {
@@ -294,6 +305,7 @@ impl Listener {
                 }
             }
         }
+        connections.stop_all();
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
@@ -315,7 +327,11 @@ impl Listener {
     }
 }
 
-fn spawn_connection(stream: Stream, daemon: Arc<Daemon>) {
+fn spawn_connection(
+    stream: Stream,
+    daemon: Arc<Daemon>,
+    connections: &WorkRegistry,
+) {
     let open = daemon.open.fetch_add(1, Ordering::Relaxed) + 1;
     if open > MAX_CONNECTIONS {
         daemon.open.fetch_sub(1, Ordering::Relaxed);
@@ -328,18 +344,29 @@ fn spawn_connection(stream: Stream, daemon: Arc<Daemon>) {
         return;
     }
 
-    // A handle kept back so the connection can be closed if it never gets a
-    // thread to serve it.
-    let refused = stream.try_clone();
+    // The listener owns this thread through `connections`, so shutdown can
+    // close the socket a request handler is parked on and join it. `Builder`
+    // also turns an OS thread shortage into a refusal rather than a panic
+    // through the accept loop.
+    // The shutdown duplicate must not outlive the connection it belongs to:
+    // clients detect a closed connection by seeing EOF, not by a lingering
+    // descriptor held in the owner's unblock slot.
+    let closer_slot = Arc::new(Mutex::new(stream.try_clone().ok()));
+    let slot_for_stop = Arc::clone(&closer_slot);
+    let unblock: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if let Ok(slot) = slot_for_stop.lock()
+            && let Some(stream) = slot.as_ref()
+        {
+            stream.shutdown();
+        }
+    });
     let slots = Arc::clone(&daemon.open);
-
-    // `Builder` rather than `thread::spawn`, which panics when the OS will not
-    // give us a thread. That panic would unwind through the accept loop and
-    // take the listener with it, so one exhausted moment on a busy client
-    // would end control for good. Refusing this one connection recovers.
-    let spawned = std::thread::Builder::new()
-        .name("soulseek-control".to_string())
-        .spawn(move || {
+    let refused = stream.try_clone().ok();
+    let slots_for_error = Arc::clone(&slots);
+    if let Err(e) = connections.try_spawn(
+        "soulseek-control",
+        Some(unblock),
+        move |_stop| {
             if let Err(e) = handle(stream, daemon.as_ref()) {
                 // Loud, not debug: a client sees only "the connection closed",
                 // so this line is the only account of why it did.
@@ -347,15 +374,55 @@ fn spawn_connection(stream: Stream, daemon: Arc<Daemon>) {
                     "control connection dropped before it could be served: {e}"
                 );
             }
-            daemon.open.fetch_sub(1, Ordering::Relaxed);
-        });
-
-    if let Err(e) = spawned {
+            if let Ok(mut slot) = closer_slot.lock() {
+                *slot = None;
+            }
+            slots.fetch_sub(1, Ordering::Relaxed);
+        },
+    ) {
         soulseek_rs::warn!("cannot serve a control connection: {e}");
-        if let Ok(refused) = refused {
-            refused.shutdown();
+        if let Some(stream) = refused {
+            stream.shutdown();
         }
-        slots.fetch_sub(1, Ordering::Relaxed);
+        slots_for_error.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The two threads a served connection starts. One owner unsubscribes,
+/// disconnects the writer's channel, gives it a short flush window, shuts the
+/// socket to unblock a stalled write, then joins both — on success, error and
+/// panic alike.
+struct ServingThreads {
+    out: Option<SyncSender<Response>>,
+    writer: Option<JoinHandle<()>>,
+    pump: Option<JoinHandle<()>>,
+    closer: Stream,
+    unsubscribe: Option<(Arc<Hub>, u64)>,
+}
+
+impl Drop for ServingThreads {
+    fn drop(&mut self) {
+        if let Some((hub, subscription)) = self.unsubscribe.take() {
+            hub.unsubscribe(subscription);
+        }
+        drop(self.out.take());
+        if let Some(writer) = &self.writer {
+            let deadline = Instant::now() + WRITER_FLUSH_GRACE;
+            while !writer.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        self.closer.shutdown();
+        if let Some(pump) = self.pump.take()
+            && let Err(panic) = pump.join()
+        {
+            soulseek_rs::warn!("control event pump panicked: {panic:?}");
+        }
+        if let Some(writer) = self.writer.take()
+            && let Err(panic) = writer.join()
+        {
+            soulseek_rs::warn!("control writer panicked: {panic:?}");
+        }
     }
 }
 
@@ -369,16 +436,23 @@ fn handle(stream: Stream, daemon: &Daemon) -> std::io::Result<()> {
     stream.set_read_timeout(Some(AUTH_TIMEOUT));
 
     let (out, outbox) = sync_channel::<Response>(WRITE_QUEUE_DEPTH);
-    let writer = std::thread::spawn(move || write_loop(stream, &outbox));
+    let writer = thread::Builder::new()
+        .name("soulseek-control-writer".to_string())
+        .spawn(move || write_loop(stream, &outbox))?;
+    let mut threads = ServingThreads {
+        out: Some(out.clone()),
+        writer: Some(writer),
+        pump: None,
+        closer: closer.try_clone()?,
+        unsubscribe: None,
+    };
 
     if !authenticate(&mut reader, daemon, trusted, &out) {
-        // Let the writer flush the refusal before closing: shutting the socket
-        // first discards the reply, and the caller learns only that the
-        // connection vanished — which is indistinguishable from the daemon
-        // having crashed.
+        // The guard drains the refusal before closing: shutting the socket
+        // first discards the reply and leaves the caller unable to tell a
+        // refusal from a crashed daemon.
         drop(out);
-        let _ = writer.join();
-        closer.shutdown();
+        drop(threads);
         return Ok(());
     }
     // An established client is expected to idle, holding the connection open
@@ -391,16 +465,20 @@ fn handle(stream: Stream, daemon: &Daemon) -> std::io::Result<()> {
         let closer = closer.try_clone()?;
         daemon.hub.subscribe(move || closer.shutdown())
     };
+    threads.unsubscribe = Some((Arc::clone(&daemon.hub), subscription));
     let pump = {
         let out = out.clone();
-        std::thread::spawn(move || {
-            for event in events {
-                if out.send(event).is_err() {
-                    break;
+        thread::Builder::new()
+            .name("soulseek-control-pump".to_string())
+            .spawn(move || {
+                for event in events {
+                    if out.send(event).is_err() {
+                        break;
+                    }
                 }
-            }
-        })
+            })?
     };
+    threads.pump = Some(pump);
 
     // Requests are answered on this thread, in order. A method slow enough to
     // matter (re-indexing a large share) delays only the connection that asked
@@ -431,11 +509,10 @@ fn handle(stream: Stream, daemon: &Daemon) -> std::io::Result<()> {
         }
     }
 
-    daemon.hub.unsubscribe(subscription);
     drop(out);
-    let _ = pump.join();
-    let _ = writer.join();
-    closer.shutdown();
+    // The guard unsubscribes, lets the writer drain, unblocks the socket and
+    // joins both threads; it does the same if an earlier return unwinds here.
+    drop(threads);
     Ok(())
 }
 

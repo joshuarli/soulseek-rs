@@ -1,12 +1,21 @@
 use super::{
-    Arc, AtomicBool, Client, ClientContext, ClientOperation, ConnectionType,
-    DownloadPeer, Listen, Peer, PeerRegistry, Receiver, Result, RwLock,
-    RwLockExt, Sender, ServerActor, ServerMessage, Shares, SoulseekRs,
-    TcpStream, error, info, mpsc, thread, trace, warn,
+    ActorSystem, Arc, AtomicBool, Client, ClientContext, ClientOperation,
+    ConnectionType, DEFAULT_WORKER_CAPACITY, DownloadPeer, Listen, Peer,
+    PeerRegistry, Result, RwLock, RwLockExt, ServerActor, ServerMessage,
+    Shares, SoulseekRs, TcpStream, WorkRegistry, error, info, thread, trace,
+    warn,
 };
+use crate::utils::semaphore::{BoundedSender, bounded_channel};
+use std::net::TcpListener;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+/// Maximum operations waiting for the client loop. A full queue refuses the
+/// newcomer and reports it; it is a bound on buffered work, not a claim about
+/// what a session needs (the stress and RSS workloads supply that evidence).
+const OPERATION_QUEUE_DEPTH: usize = 1024;
 
 const LISTENER_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 const LOGIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -42,6 +51,93 @@ fn warn_if_open_file_limit_is_low() {
     }
 }
 
+struct ListenerReleased {
+    done: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl ListenerReleased {
+    const fn new() -> Self {
+        Self {
+            done: Mutex::new(false),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn release(&self) {
+        let mut done =
+            self.done.lock().unwrap_or_else(PoisonError::into_inner);
+        *done = true;
+        self.wake.notify_all();
+    }
+
+    fn wait(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut done =
+            self.done.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*done {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, _) = self
+                .wake
+                .wait_timeout(done, remaining)
+                .unwrap_or_else(PoisonError::into_inner);
+            done = next;
+        }
+        *done
+    }
+}
+
+/// Owner of the peer listener. Drop signals stop, dials the listener to wake
+/// its parked accept, waits for the port release and joins the thread — the
+/// same path on normal disconnect, error and test failure.
+pub struct ListenerOwner {
+    stop: Arc<AtomicBool>,
+    released: Arc<ListenerReleased>,
+    // A clone of the bound socket: making it non-blocking unblocks the
+    // accept loop even when a direct dial cannot reach it.
+    listener: TcpListener,
+    port: u16,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl ListenerOwner {
+    /// Explicit, bounded shutdown so a caller need not rely on `Drop` to
+    /// block. Idempotent: a second call has no handle left to join.
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.listener.set_nonblocking(true);
+        if TcpStream::connect(("127.0.0.1", self.port)).is_ok()
+            && !self.released.wait(LISTENER_RELEASE_TIMEOUT)
+        {
+            warn!(
+                "[client] listener on {} did not release within {:?}",
+                self.port, LISTENER_RELEASE_TIMEOUT
+            );
+        }
+        if let Some(handle) = self.handle.take()
+            && let Err(panic) = handle.join()
+        {
+            error!("[client] peer listener panicked: {panic:?}");
+        }
+    }
+}
+
+impl Drop for ListenerOwner {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Disconnect stops the owners in the context for good, so a later connect
+/// has to install fresh ones or it would spawn no server actor and no workers.
+fn reset_owners(ctx: &mut ClientContext) {
+    ctx.actor_system = Arc::new(ActorSystem::new());
+    ctx.work = Arc::new(WorkRegistry::new(DEFAULT_WORKER_CAPACITY));
+}
+
 impl Client {
     pub fn connect(&mut self) -> Result<()> {
         // Re-entering would replace the actor handle and leave the first
@@ -52,11 +148,12 @@ impl Client {
         warn_if_open_file_limit_is_low();
 
         let (sender, message_reader): (
-            Sender<ClientOperation>,
-            Receiver<ClientOperation>,
-        ) = mpsc::channel();
+            BoundedSender<ClientOperation>,
+            std::sync::mpsc::Receiver<ClientOperation>,
+        ) = bounded_channel(OPERATION_QUEUE_DEPTH, "client operations");
 
         let mut ctx = self.context.write_safe()?;
+        reset_owners(&mut ctx);
         let peer_registry = PeerRegistry::with_capacity(
             ctx.actor_system.clone(),
             sender.clone(),
@@ -107,8 +204,6 @@ impl Client {
         } else {
             None
         };
-        self.listener_stopped = Arc::new(AtomicBool::new(false));
-
         let mut server_actor = ServerActor::new(
             self.address.clone(),
             sender,
@@ -126,26 +221,56 @@ impl Client {
                 actor.set_self_handle(handle);
             },
         ));
+        // A guard with a destructor lives to the end of its scope, not its
+        // last use. Release it before starting threads that read the context.
+        drop(ctx);
 
         if let Some(listener) = listener {
             let client_sender = listen_sender;
             let context = self.context.clone();
             let own_username = self.username.clone();
-            let stopped = self.listener_stopped.clone();
-            let released = Arc::new(AtomicBool::new(false));
-            self.listener_released = released.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let released = Arc::new(ListenerReleased::new());
+            let loop_stop = Arc::clone(&stop);
+            let loop_released = Arc::clone(&released);
+            let port = listener.local_addr()?.port();
+            let owner_listener = listener.try_clone()?;
 
-            thread::spawn(move || {
-                Listen::serve(
-                    &listener,
-                    client_sender,
-                    context,
-                    own_username,
-                    stopped,
-                );
-                drop(listener);
-                released.store(true, Ordering::Relaxed);
-            });
+            // Builder over thread::spawn: a thread the OS refuses must come
+            // back as an error rather than panic through `connect`.
+            let spawned = thread::Builder::new()
+                .name("soulseek-peer-listener".to_string())
+                .spawn(move || {
+                    Listen::serve(
+                        &listener,
+                        client_sender,
+                        context,
+                        own_username,
+                        loop_stop,
+                    );
+                    drop(listener);
+                    loop_released.release();
+                });
+            match spawned {
+                Ok(handle) => {
+                    self.listener_owner = Some(ListenerOwner {
+                        stop,
+                        released,
+                        listener: owner_listener,
+                        port,
+                        handle: Some(handle),
+                    });
+                }
+                Err(e) => {
+                    // Undo the channel and registry installed above: without
+                    // a listener, neither may outlive this failed connect.
+                    if let Ok(mut ctx) = self.context.write_safe() {
+                        ctx.operations = None;
+                        ctx.peer_registry = None;
+                    }
+                    return Err(e.into());
+                }
+            }
         }
 
         Self::listen_to_client_operations(
@@ -172,33 +297,33 @@ impl Client {
         if let Some(handle) = self.server_handle.take() {
             let _ = handle.stop();
         }
-        let registry = match self.context.write_safe() {
+        let (registry, actors, workers) = match self.context.write_safe() {
             Ok(mut ctx) => {
                 // Dropping our end of the operations channel is what lets its
                 // thread finish once the peers and the listener have gone.
                 ctx.operations = None;
-                ctx.peer_registry.clone()
+                (
+                    ctx.peer_registry.clone(),
+                    Some(Arc::clone(&ctx.actor_system)),
+                    Some(Arc::clone(&ctx.work)),
+                )
             }
-            Err(_) => None,
+            Err(_) => (None, None, None),
         };
         if let Some(registry) = registry {
             registry.stop_all();
         }
-        // The listener thread is parked in accept(), so it only notices the
-        // flag when a connection arrives: dial it once ourselves. Without
-        // this the port stays bound for the life of the process, and the next
-        // client falls back to an ephemeral port nobody was told about.
-        self.listener_stopped.store(true, Ordering::Relaxed);
-        if let Some(port) = self.bound_port.take()
-            && TcpStream::connect(("127.0.0.1", port)).is_ok()
-        {
-            let deadline = Instant::now() + LISTENER_RELEASE_TIMEOUT;
-            while !self.listener_released.load(Ordering::Relaxed)
-                && Instant::now() < deadline
-            {
-                thread::sleep(Duration::from_millis(5));
-            }
+        if let Some(actors) = actors {
+            actors.stop_all();
         }
+        if let Some(workers) = workers {
+            workers.stop_all();
+        }
+        // The listener owner signals stop, dials the accept loop open, waits
+        // for the port and joins its thread. Dropping it here runs that path
+        // on every disconnect, including the implicit one in `Client::drop`.
+        self.listener_owner.take();
+        self.bound_port.take();
     }
 
     /// Log in and wait for the server's verdict.
@@ -438,5 +563,107 @@ impl Client {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_operation_channel_reports_a_full_queue() {
+        let (sender, _receiver) = bounded_channel::<ClientOperation>(
+            OPERATION_QUEUE_DEPTH,
+            "client operations",
+        );
+        for sequence in 0..OPERATION_QUEUE_DEPTH {
+            sender
+                .send(ClientOperation::OwnPrivileges(sequence as u32))
+                .expect("every slot accepts one operation");
+        }
+        assert!(
+            sender.send(ClientOperation::OwnPrivileges(u32::MAX)).is_err(),
+            "one operation past the bound must be refused, not buffered"
+        );
+    }
+
+    #[test]
+    fn dropping_the_listener_owner_stops_and_joins_its_thread() {
+        let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = bound.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(ListenerReleased::new());
+        let exited = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let loop_stop = Arc::clone(&stop);
+        let loop_released = Arc::clone(&released);
+        let loop_exited = Arc::clone(&exited);
+        let handle = thread::Builder::new()
+            .name("test-peer-listener".to_string())
+            .spawn(move || {
+                entered_tx.send(()).unwrap();
+                while !loop_stop.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                loop_released.release();
+                loop_exited.store(true, Ordering::Release);
+            })
+            .unwrap();
+        let owner = ListenerOwner {
+            stop,
+            released,
+            listener: bound.try_clone().unwrap(),
+            port,
+            handle: Some(handle),
+        };
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(owner);
+        assert!(
+            exited.load(Ordering::Acquire),
+            "the owner must join a thread it signalled to stop"
+        );
+    }
+
+    #[test]
+    fn disconnect_then_connect_installs_fresh_owners() {
+        struct TestActor;
+        impl crate::actor::Actor for TestActor {
+            type Message = ();
+            fn handle(&mut self, (): ()) {}
+        }
+
+        let mut client = Client::new("peer", "secret");
+        client.disconnect();
+
+        {
+            let ctx = client.context.read().expect("context");
+            assert!(
+                ctx.actor_system
+                    .try_spawn_with_handle(TestActor, |_, _| {})
+                    .is_err(),
+                "disconnect must stop the actor system"
+            );
+            assert!(
+                ctx.work.try_spawn("test", None, |_| {}).is_err(),
+                "disconnect must stop the worker registry"
+            );
+        }
+
+        {
+            let mut ctx = client.context.write().expect("context");
+            reset_owners(&mut ctx);
+        }
+
+        let ctx = client.context.read().expect("context");
+        assert!(
+            ctx.actor_system
+                .try_spawn_with_handle(TestActor, |_, _| {})
+                .is_ok(),
+            "a new session must get a live actor system"
+        );
+        assert!(
+            ctx.work.try_spawn("test", None, |_| {}).is_ok(),
+            "a new session must get a live worker registry"
+        );
     }
 }

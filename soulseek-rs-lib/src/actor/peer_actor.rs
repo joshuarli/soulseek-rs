@@ -14,11 +14,12 @@ use crate::message::{Handlers, Message, MessageReader, MessageType};
 use crate::peer::Peer;
 use crate::types::{Download, SearchResult, Transfer};
 use crate::utils::lock::RwLockExt;
+use crate::utils::semaphore::BoundedSender;
 use crate::{debug, error, trace, warn};
 
 use std::io::{self, Error, Write};
 use std::net::TcpStream;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -80,7 +81,7 @@ pub struct PeerActor {
     stream: Option<TcpStream>,
     connection_state: ConnectionState,
     reader: MessageReader,
-    client_channel: Sender<ClientOperation>,
+    client_channel: BoundedSender<ClientOperation>,
     self_handle: Option<ActorHandle<PeerMessage>>,
     dispatcher: Option<MessageDispatcher<PeerMessage>>,
     dispatcher_receiver: Option<Receiver<PeerMessage>>,
@@ -154,7 +155,7 @@ impl PeerActor {
         peer: Peer,
         stream: Option<TcpStream>,
         reader: Option<MessageReader>,
-        client_channel: Sender<ClientOperation>,
+        client_channel: BoundedSender<ClientOperation>,
         own_username: String,
         id: u64,
     ) -> Self {
@@ -1146,6 +1147,7 @@ mod tests;
 mod framing_tests {
     use super::*;
     use crate::peer::ConnectionType;
+    use crate::utils::semaphore::bounded_channel;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc::Receiver;
@@ -1166,7 +1168,7 @@ mod framing_tests {
     fn actor_on(
         stream: TcpStream,
     ) -> (PeerActor, Receiver<ClientOperation>) {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = bounded_channel(64, "test operations");
         let peer = Peer::new(
             "bob".to_string(),
             ConnectionType::P,

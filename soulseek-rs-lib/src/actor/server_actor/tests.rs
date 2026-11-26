@@ -1,4 +1,5 @@
 use super::*;
+use crate::utils::semaphore::bounded_channel;
 use std::io::Read;
 use std::net::TcpListener;
 
@@ -43,7 +44,7 @@ fn parked_actor(port: u16) -> ServerActor {
 fn parked_actor_with_client(
     port: u16,
 ) -> (ServerActor, std::sync::mpsc::Receiver<ClientOperation>) {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = bounded_channel(64, "test operations");
     let actor = ServerActor::new(
         PeerAddress::new("127.0.0.1".to_string(), port),
         tx,

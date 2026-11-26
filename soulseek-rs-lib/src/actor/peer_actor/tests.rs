@@ -1,6 +1,7 @@
 use super::*;
 use crate::message::peer::build_shared_file_list;
 use crate::peer::{ConnectionType, Peer};
+use crate::utils::semaphore::bounded_channel;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::Receiver;
 
@@ -21,7 +22,7 @@ fn connected_actor() -> (PeerActor, Receiver<ClientOperation>, TcpStream) {
 fn make_actor(
     stream: Option<TcpStream>,
 ) -> (PeerActor, Receiver<ClientOperation>) {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = bounded_channel(64, "test operations");
     let peer = Peer::new(
         "bob".to_string(),
         ConnectionType::P,
@@ -118,8 +119,8 @@ fn big_listing() -> Vec<u8> {
 fn self_handle(
     actor: &mut PeerActor,
 ) -> Receiver<crate::actor::ActorMessage<PeerMessage>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    actor.set_self_handle(ActorHandle { sender: tx });
+    let (tx, rx) = bounded_channel(64, "test actor");
+    actor.set_self_handle(ActorHandle::from_bounded(tx));
     rx
 }
 

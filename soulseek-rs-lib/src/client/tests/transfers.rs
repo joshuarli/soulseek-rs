@@ -2,6 +2,7 @@
 //! and what a peer's answer is allowed to start.
 
 use super::*;
+use crate::utils::semaphore::bounded_channel;
 
 #[test]
 fn test_client_context_downloads() {
@@ -182,7 +183,7 @@ fn an_expired_broker_connect_fails_the_queued_downloads() {
         ctx.pending_connect_tokens
             .insert(7, ("ghost".to_string(), Instant::now()));
     }
-    let (_ops_tx, ops_rx) = mpsc::channel();
+    let (_ops_tx, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),
@@ -213,7 +214,7 @@ fn a_replayed_transfer_response_does_not_start_a_second_transfer() {
     queued.download_directory = download_dir.display().to_string();
     client.context.write().unwrap().add_download(queued);
 
-    let (ops_tx, ops_rx) = mpsc::channel();
+    let (ops_tx, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),
@@ -279,7 +280,7 @@ fn a_cancelled_download_is_not_started_when_the_peer_allows_it() {
         sender,
     ));
 
-    let (ops_tx, ops_rx) = mpsc::channel();
+    let (ops_tx, ops_rx) = bounded_channel(64, "test operations");
     Client::listen_to_client_operations(
         ops_rx,
         client.context.clone(),

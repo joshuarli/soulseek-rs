@@ -1,8 +1,8 @@
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, RwLock};
+use crate::utils::semaphore::BoundedSender;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use crate::message::{Message, MessageReader};
 use crate::peer::{ConnectionType, DownloadError, DownloadPeer, Peer};
 use crate::types::Download;
 use crate::utils::lock::RwLockExt;
-use crate::utils::semaphore::{Permit, Semaphore};
+use crate::utils::semaphore::{Permit, Semaphore, WorkRegistry};
 use crate::{debug, error, info, trace};
 
 /// How long to wait before accepting again after a failure.
@@ -31,11 +31,16 @@ const TOKEN_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MAX_HANDSHAKES: usize = 128;
 
+/// Ceiling on connection threads owned by one listener. Handshakes have their
+/// own permit; this caps the whole set so a peer burst cannot grow threads
+/// without bound.
+const MAX_CONNECTIONS: usize = 256;
+
 const MAX_PEER_INIT_BYTES: usize = 4096;
 
 #[derive(Clone)]
 struct ConnectionContext {
-    client_sender: Sender<ClientOperation>,
+    client_sender: BoundedSender<ClientOperation>,
     client_context: Arc<RwLock<ClientContext>>,
     own_username: String,
 }
@@ -129,8 +134,12 @@ fn wait_for_download_registration(
     token: u32,
     username: &str,
     deadline: Instant,
+    stop: &AtomicBool,
 ) -> Option<Download> {
     loop {
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
         let download = match client_context.write_safe() {
             Ok(mut context) => {
                 context.downloads.claim_for_peer(token, username)
@@ -191,11 +200,15 @@ fn handle_file_connection(
     token: u32,
     context: &ConnectionContext,
     deadline: Instant,
+    stop: &AtomicBool,
 ) {
     trace!(
         "[client] DownloadFromPeer token: {} peer: {:?}",
         token, peer
     );
+    if stop.load(Ordering::Acquire) {
+        return;
+    }
 
     if let Err(e) = wait_for_transfer_token(&mut stream, &mut reader, deadline)
     {
@@ -213,6 +226,7 @@ fn handle_file_connection(
                 transfer_token,
                 &peer.username,
                 Instant::now() + TOKEN_REGISTRATION_TIMEOUT,
+                stop,
             )
         });
     let download_peer = DownloadPeer::new(
@@ -308,7 +322,11 @@ fn handle_incoming_connection(
     mut stream: TcpStream,
     context: ConnectionContext,
     permit: Permit,
+    stop: &AtomicBool,
 ) {
+    if stop.load(Ordering::Acquire) {
+        return;
+    }
     let Ok(peer_addr) = stream.peer_addr() else {
         error!("[listener] failed to get peer address");
         return;
@@ -331,6 +349,9 @@ fn handle_incoming_connection(
             }
         };
     drop(permit);
+    if stop.load(Ordering::Acquire) {
+        return;
+    }
 
     // A firewalled peer brokered through the server connects back with a
     // PierceFirewall (code 0) instead of a PeerInit (code 1).
@@ -388,6 +409,7 @@ fn handle_incoming_connection(
             init_data.token,
             &context,
             deadline,
+            stop,
         ),
         ConnectionType::D => {
             // A child asking to hang from us. The client decides whether it
@@ -431,7 +453,7 @@ impl Listen {
 
     pub fn serve(
         listener: &TcpListener,
-        client_sender: Sender<ClientOperation>,
+        client_sender: BoundedSender<ClientOperation>,
         client_context: Arc<RwLock<ClientContext>>,
         own_username: String,
         stopped: Arc<AtomicBool>,
@@ -444,11 +466,15 @@ impl Listen {
             own_username,
         };
         let handshakes = Arc::new(Semaphore::new(MAX_HANDSHAKES));
+        // The listener owns every connection thread it starts. When it stops
+        // it signals them, shuts down the sockets they may be parked on and
+        // joins them before the port is released.
+        let connections = WorkRegistry::new(MAX_CONNECTIONS);
 
         for stream in listener.incoming() {
             if stopped.load(Ordering::Relaxed) {
                 debug!("[listener] stopping, releasing the port");
-                return;
+                break;
             }
             let Ok(stream) = stream else {
                 error!(
@@ -471,13 +497,37 @@ impl Listen {
                 continue;
             };
             let context = context.clone();
-            // One thread per connection: the peer-init handshake blocks, and a
-            // peer that is slow to send one must not stop us accepting anybody
+            // One owned thread per connection: the peer-init handshake blocks,
+            // and a peer slow to send one must not stop us accepting anybody
             // else — a wedged accept loop makes us unreachable to every peer.
-            thread::spawn(move || {
-                handle_incoming_connection(stream, context, permit);
+            // The owner needs a way to shut down a parked read, but that
+            // duplicate must not keep the socket alive after the worker ends:
+            // peers learn a transfer finished by seeing EOF.
+            let closer_slot = Arc::new(Mutex::new(stream.try_clone().ok()));
+            let slot_for_stop = Arc::clone(&closer_slot);
+            let unblock: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                if let Ok(slot) = slot_for_stop.lock()
+                    && let Some(stream) = slot.as_ref()
+                {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
             });
+            if let Err(e) = connections.try_spawn(
+                "soulseek-peer-connection",
+                Some(unblock),
+                move |stop| {
+                    handle_incoming_connection(stream, context, permit, &stop);
+                    if let Ok(mut slot) = closer_slot.lock() {
+                        *slot = None;
+                    }
+                },
+            ) {
+                // The job (and with it the socket and handshake permit) is
+                // dropped on refusal; say so rather than silently disappearing.
+                error!("[listener] refusing a peer connection: {e}");
+            }
         }
+        connections.stop_all();
     }
 }
 
@@ -515,6 +565,7 @@ mod tests {
             7,
             "peer",
             Instant::now() + Duration::from_millis(200),
+            &Arc::new(AtomicBool::new(false)),
         );
 
         assert!(claimed.is_none(), "a cancelled transfer must not restart");
@@ -539,6 +590,7 @@ mod tests {
             7,
             "peer",
             Instant::now() + Duration::from_secs(5),
+            &Arc::new(AtomicBool::new(false)),
         );
 
         assert!(
@@ -558,12 +610,32 @@ mod tests {
             7,
             "peer",
             started + Duration::from_millis(200),
+            &Arc::new(AtomicBool::new(false)),
         );
 
         assert!(download.is_none(), "an unknown token must not be invented");
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "the deadline must bound the wait"
+        );
+    }
+
+    #[test]
+    fn a_stopped_listener_worker_does_not_wait_out_its_registration_deadline() {
+        let client_context = Arc::new(RwLock::new(ClientContext::new()));
+        let stop = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+        let download = wait_for_download_registration(
+            &client_context,
+            7,
+            "peer",
+            Instant::now() + Duration::from_secs(30),
+            &stop,
+        );
+        assert!(download.is_none(), "stopped work must not claim a transfer");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the stop flag must break the registration wait immediately"
         );
     }
 
@@ -580,6 +652,7 @@ mod tests {
             7,
             "impostor",
             Instant::now() + Duration::from_millis(200),
+            &Arc::new(AtomicBool::new(false)),
         );
 
         assert!(
@@ -604,6 +677,7 @@ mod tests {
             7,
             "peer",
             Instant::now() + Duration::from_millis(200),
+            &Arc::new(AtomicBool::new(false)),
         );
 
         assert!(

@@ -7,7 +7,8 @@
 use super::{
     ActorSystem, Arc, AtomicBool, AtomicUsize, BROKER_CONNECT_TIMEOUT,
     BROWSE_PROTECT_WINDOW, ClientContext, DEFAULT_MAX_PEERS,
-    DEFAULT_UPLOAD_SLOTS, DownloadStatus, DownloadStore, HashMap, HashSet,
+    DEFAULT_UPLOAD_SLOTS, DEFAULT_WORKER_CAPACITY, DownloadStatus,
+    DownloadStore, HashMap, HashSet, WorkRegistry,
     Instant, PENDING_PEER_TTL, PendingServe, Recommendation, RoomEvent, RoomInfo, RoomTicker,
     RoomUserStats, SharedDirectory, Shares, SimilarUser, UserInfo,
     UserInterests, UserMessage, UserPresence, UserStats, UserStatus, children,
@@ -121,6 +122,7 @@ impl ClientContext {
             peer_registry: None,
             server_sender: None,
             operations: None,
+            work: Arc::new(WorkRegistry::new(DEFAULT_WORKER_CAPACITY)),
             leaf: distributed::Leaf::new(""),
             children: children::Children::default(),
             announced_accept_children: None,

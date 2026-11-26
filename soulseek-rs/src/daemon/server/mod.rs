@@ -868,6 +868,35 @@ mod tests {
     }
 
     #[test]
+    fn dropping_the_listener_owns_and_joins_existing_connections() {
+        let server = serve_on_port_zero("secret");
+        let address = server.address;
+        let open = Arc::clone(&server.daemon.open);
+        let mut stream = connect(address);
+        let reply = authenticate(&mut stream, "secret");
+        assert!(reply.contains("\"result\""), "{reply}");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while open.load(Ordering::Relaxed) < 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the connection was never served"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        drop(server);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while open.load(Ordering::Relaxed) != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "a control connection outlived the listener that accepted it"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn an_idle_listener_waits_on_readiness_not_a_polling_alarm() {
         let server = serve_on_port_zero("secret");
         // Well under the 100 ms stop-check backstop: a 1 ms sleep loop would

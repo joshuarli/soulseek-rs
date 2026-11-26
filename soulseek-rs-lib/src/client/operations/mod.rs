@@ -3,7 +3,7 @@ use super::{
     DownloadPeer, DownloadStatus, Duration, Instant, Peer, PeerMessage,
     PeerRegistry, Receiver, RwLock, RwLockExt, ServerMessage,
     build_search_response, debug, error, info, mpsc, next_connect_token,
-    thread, trace, warn,
+    trace, warn,
 };
 use crate::message::server::MessageFactory;
 use crate::peer::DownloadError;
@@ -32,10 +32,27 @@ impl Client {
         client_context: Arc<RwLock<ClientContext>>,
         own_username: String,
     ) {
-        thread::spawn(move || {
+        // The operations loop is owned by the same registry as the transfers
+        // it starts: disconnect signals stop and joins it with everything
+        // else, instead of leaving it parked on the channel.
+        let work = match client_context.read_safe() {
+            Ok(ctx) => Arc::clone(&ctx.work),
+            Err(e) => {
+                error!("[client] operations loop owner read: {e}");
+                return;
+            }
+        };
+        let work_for_peer = Arc::clone(&work);
+        if let Err(e) = work.try_spawn(
+            "soulseek-operations",
+            None,
+            move |stop| {
             let mut last_sweep = Instant::now();
             let mut last_queue_poll = Instant::now();
             loop {
+                if stop.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
                 let next = reader.recv_timeout(CONNECT_SWEEP_INTERVAL);
                 if last_sweep.elapsed() >= CONNECT_SWEEP_INTERVAL {
                     last_sweep = Instant::now();
@@ -67,14 +84,22 @@ impl Client {
                             let client_context_clone = client_context.clone();
                             let own_username_clone = own_username.clone();
 
-                            thread::spawn(move || {
-                                Self::connect_to_peer(
-                                    peer,
-                                    client_context_clone,
-                                    own_username_clone,
-                                    None,
+                            if let Err(e) = work_for_peer.try_spawn(
+                                "soulseek-connect",
+                                None,
+                                move |_stop| {
+                                    Self::connect_to_peer(
+                                        peer,
+                                        client_context_clone,
+                                        own_username_clone,
+                                        None,
+                                    );
+                                },
+                            ) {
+                                error!(
+                                    "[client] cannot start peer connect: {e}"
                                 );
-                            });
+                            }
                         } else {
                             Self::connect_to_peer(
                                 peer,
@@ -705,7 +730,10 @@ impl Client {
                     }
                 }
             }
-        });
+            },
+        ) {
+            error!("[client] cannot start operations loop: {e}");
+        }
     }
 
     /// Ask every peer holding a queued download of ours where it sits. The

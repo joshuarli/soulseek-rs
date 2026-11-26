@@ -8,6 +8,7 @@ use crate::message::distributed::{self, Distributed};
 use crate::message::server::MessageFactory;
 use crate::peer::ConnectionType;
 use crate::utils::lock::RwLockExt;
+use crate::utils::semaphore::BoundedSender;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -346,7 +347,7 @@ pub fn announce_move(
 
 /// Dial a parent candidate on its own thread: a `D` PeerInit, then whatever it
 /// sends comes back as operations until the link closes or is cancelled.
-pub fn spawn_link(dial: Dial, own: String, ops: Sender<ClientOperation>) {
+pub fn spawn_link(dial: Dial, own: String, ops: BoundedSender<ClientOperation>) {
     let closed = ClientOperation::ParentClosed {
         parent: dial.username.clone(),
         link: dial.link,
@@ -377,7 +378,7 @@ pub fn spawn_link(dial: Dial, own: String, ops: Sender<ClientOperation>) {
 fn link(
     dial: &Dial,
     own: &str,
-    ops: &Sender<ClientOperation>,
+    ops: &BoundedSender<ClientOperation>,
 ) -> io::Result<()> {
     let addr = (dial.host.as_str(), dial.port)
         .to_socket_addrs()?

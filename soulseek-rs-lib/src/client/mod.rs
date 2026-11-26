@@ -10,6 +10,9 @@ use crate::types::{
 };
 use crate::utils::logger;
 use crate::utils::rate_limit::RateLimit;
+use crate::utils::semaphore::{
+    BoundedSender, DEFAULT_WORKER_CAPACITY, WorkRegistry,
+};
 use crate::{
     Transfer,
     actor::{ActorSystem, peer_registry::PeerRegistry},
@@ -500,8 +503,12 @@ pub struct ClientContext {
     pub peer_registry: Option<PeerRegistry>,
     pub downloads: DownloadStore,
     server_sender: Option<Sender<ServerMessage>>,
-    /// Where anything outside the operations loop posts operations.
-    operations: Option<Sender<ClientOperation>>,
+    /// Where anything outside the operations loop posts operations. Bounded:
+    /// a full queue reports the refusal instead of growing without limit.
+    operations: Option<BoundedSender<ClientOperation>>,
+    /// Owner of every transfer and inbound-connection thread this session
+    /// starts. Stops and joins them when the context is dropped.
+    pub(crate) work: Arc<WorkRegistry>,
     /// Our place in the distributed search network.
     leaf: distributed::Leaf,
     /// The children hanging from us, when the client serves any.
@@ -686,10 +693,9 @@ pub struct Client {
     server_handle: Option<ActorHandle<ServerMessage>>,
     context: Arc<RwLock<ClientContext>>,
     session: SessionWatch,
-    /// Tells the peer listener to stop, so a disconnected client releases the
-    /// port it bound.
-    listener_stopped: Arc<AtomicBool>,
-    listener_released: Arc<AtomicBool>,
+    /// Owns the peer listener thread: dropping it signals stop, unblocks the
+    /// accept loop, waits for the port release and joins the thread.
+    listener_owner: Option<connection::ListenerOwner>,
     cancel: CancelHandle,
 }
 
@@ -724,8 +730,7 @@ impl Client {
             shared_directories: settings.shared_directories,
             server_handle: None,
             session: SessionWatch::default(),
-            listener_stopped: Arc::new(AtomicBool::new(false)),
-            listener_released: Arc::new(AtomicBool::new(false)),
+            listener_owner: None,
             cancel: CancelHandle::new(),
         }
     }
